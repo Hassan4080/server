@@ -8,6 +8,9 @@ import crypto from "node:crypto";
 
 const PORT = process.env.PORT || 8080;
 
+// --- skins: nameHash -> [s1, s2]
+const skinRegistry = new Map();
+
 // ---------- simple per-IP rate limit ----------
 const RATE_WINDOW_MS = 5_000;
 const RATE_MAX_MESSAGES = 12;
@@ -80,6 +83,12 @@ setInterval(() => {
 }, SERVER_KEEP_MS);
 
 wss.on("connection", (ws, req) => {
+  // --- send current skins snapshot to newcomer
+  if (skinRegistry.size) {
+    const data = [...skinRegistry.entries()].map(([h, [s1, s2]]) => [h, s1, s2]);
+    try { ws.send(JSON.stringify({ t: 'skin', op: 'bulk', data })); } catch {}
+  }
+
   ws.id = crypto.randomUUID();
   ws.isAlive = true;
   ws.on("pong", heartbeat);
@@ -145,6 +154,31 @@ wss.on("connection", (ws, req) => {
     }
     console.log("[leave]", ws.meta.name, "room=", room);
   });
+  // --- skin announce handler
+  ws.on('message', (buf) => {
+    let m;
+    try { m = JSON.parse(buf); } catch (e) { return; }
+    if (!m || m.t !== 'skin' || m.op !== 'announce' || typeof m.h !== 'string') return;
+    const s1 = (m.s1 || '').trim();
+    const s2 = (m.s2 || '').trim();
+    if (s1.length > 300 || s2.length > 300) return;
+    if (s1 && !/^https?:\/\//i.test(s1)) return;
+    if (s2 && !/^https?:\/\//i.test(s2)) return;
+    skinRegistry.set(m.h, [s1, s2]);
+    // Broadcast within same room if 'room' variable exists, else to all
+    try {
+      if (typeof room !== 'undefined') wss.clients.forEach(c => {
+        if (c.readyState === 1 && c.room === ws.room) c.send(JSON.stringify({ t:'skin', op:'update', h: m.h, s1, s2 }));
+      });
+    } catch(e) {}
+    // Fallback: broadcast to all if room tracking not present
+    try {
+      wss.clients.forEach(c => {
+        if (c.readyState === 1) c.send(JSON.stringify({ t:'skin', op:'update', h: m.h, s1, s2 }));
+      });
+    } catch(e) {}
+  });
+
 });
 
 server.listen(PORT, () => {

@@ -11,6 +11,7 @@ const PORT = process.env.PORT || 8080;
 // --- skins: nameHash -> [s1, s2]
 const skinRegistry = new Map();
 
+
 // ---------- simple per-IP rate limit ----------
 const RATE_WINDOW_MS = 5_000;
 const RATE_MAX_MESSAGES = 12;
@@ -59,6 +60,16 @@ const wss = new WebSocketServer({ server, path: "/chat" });
 function heartbeat() {
   this.isAlive = true;
 }
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) return ws.terminate();
+    ws.isAlive = false;
+    try {
+      ws.ping();
+    } catch {}
+  });
+}, 30_000);
+
 // SERVER-SIDE KEEPALIVE: send a small DATA frame periodically
 // Some proxies ignore control frames (ping/pong) for idleness.
 const SERVER_KEEP_MS = 25_000;
@@ -73,11 +84,36 @@ setInterval(() => {
 }, SERVER_KEEP_MS);
 
 wss.on("connection", (ws, req) => {
-  // send current known skins to newcomer
+  // --- skins bulk snapshot to newcomer (debug)
   if (skinRegistry.size) {
     const data = [...skinRegistry.entries()].map(([h, [s1, s2]]) => [h, s1, s2]);
-    try { ws.send(JSON.stringify({ t: 'skin', op: 'bulk', data })); } catch {}
+    try {
+      ws.send(JSON.stringify({ t: 'skin', op: 'bulk', data }));
+      console.log('[skin][bulk->one] entries=', data.length);
+    } catch (e) { console.warn('[skin][bulk] send failed', e); }
   }
+
+  // --- hook for skin messages (debug + broadcast-to-all)
+  ws.on('message', (raw) => {
+    let m;
+    try { m = JSON.parse(raw); } catch { return; }
+    if (!m || m.t !== 'skin') return;
+    if (m.op === 'announce' && typeof m.h === 'string') {
+      const s1 = (m.s1 || '').trim();
+      const s2 = (m.s2 || '').trim();
+      if (s1.length > 300 || s2.length > 300) return;
+      if (s1 && !/^https?:\/\//i.test(s1)) return;
+      if (s2 && !/^https?:\/\//i.test(s2)) return;
+
+      skinRegistry.set(m.h, [s1, s2]);
+      const payload = JSON.stringify({ t:'skin', op:'update', h: m.h, s1, s2 });
+      let fanout = 0;
+      wss.clients.forEach(c => {
+        if (c.readyState === 1) { try { c.send(payload); fanout++; } catch {} }
+      });
+      console.log('[skin][announce] h=%s s1=%s s2=%s fanout=%d', m.h, s1, s2, fanout);
+    }
+  });
 
   ws.id = crypto.randomUUID();
   ws.isAlive = true;

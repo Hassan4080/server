@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WS Connections (external)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; padding:20px;}
+    label{display:block;margin-bottom:8px}
+    input{padding:6px 8px;width:380px;max-width:100%}
+    table{border-collapse:collapse; width:100%; max-width:1100px; margin-top:14px;}
+    th, td{border:1px solid #ddd; padding:8px; word-break:break-all;}
+    th{background:#f7f7f7; text-align:left;}
+    .muted{opacity:.6}
+  </style>
+</head>
+<body>
+  <h1>Current WebSocket Connections</h1>
+  <label>Server base URL (no trailing slash):
+    <input id="base" value="http://localhost:8080">
+  </label>
+  <p class="muted">Polling every 2s…</p>
+  <table id="tbl">
+    <thead><tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Skin 1</th><th>Skin 2</th></tr></thead>
+    <tbody></tbody>
+  </table>
+<script>
+const baseInput = document.getElementById('base');
+async function load() {
+  const base = baseInput.value.replace(/\/+$/,'');
+  try{
+    const r = await fetch(base + '/connections.json', {cache:'no-store'});
+    const j = await r.json();
+    const tb = document.querySelector('#tbl tbody');
+    tb.innerHTML = '';
+    j.clients.forEach((c, i) => {
+      const tr = document.createElement('tr');
+      const s1 = (c.skins && c.skins[0]) || '';
+      const s2 = (c.skins && c.skins[1]) || '';
+      tr.innerHTML = '<td>'+ (i+1) +'</td>'
+                   + '<td>'+ (c.room || '') +'</td>'
+                   + '<td>'+ (c.name || '') +'</td>'
+                   + '<td>'+ (c.ip || '') +'</td>'
+                   + '<td>'+ (s1 ? '<a href="'+s1+'" target="_blank" rel="noopener">'+s1+'</a>' : '') +'</td>'
+                   + '<td>'+ (s2 ? '<a href="'+s2+'" target="_blank" rel="noopener">'+s2+'</a>' : '') +'</td>';
+      tb.appendChild(tr);
+    });
+    document.title = 'WS Connections ('+ j.count +')';
+  }catch(e){}
+}
+setInterval(load, 2000);
+load();
+</script>
+</body>
+</html>

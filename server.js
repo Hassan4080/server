@@ -1,5 +1,6 @@
 // server.js
 // WebSocket chat relay with rooms, rate-limit, heartbeats, and SERVER-SIDE keepalive data frames.
+// Adds /connections (HTML) and /connections.json (JSON) admin views showing: room, name, ip, skins.
 
 import http from "node:http";
 import { WebSocketServer } from "ws";
@@ -11,6 +12,12 @@ const PORT = process.env.PORT || 8080;
 // --- skins: nameHash -> [s1, s2]
 const skinRegistry = new Map();
 
+// Helper to stringify skins safely
+function normalizeSkins(v) {
+  if (!v) return ["", ""];
+  const [a = "", b = ""] = v;
+  return [String(a), String(b)];
+}
 
 // ---------- simple per-IP rate limit ----------
 const RATE_WINDOW_MS = 5_000;
@@ -43,13 +50,104 @@ function broadcast(room, payload, except) {
   }
 }
 
-// ---------- tiny HTTP (for health) ----------
+// ---------- tiny HTTP (health + admin) ----------
 const server = http.createServer((req, res) => {
-  if (req.url === "/" || req.url === "/health") {
+  const parsed = url.parse(req.url, true);
+  const pathname = parsed.pathname || "/";
+
+  if (pathname === "/" || pathname === "/health") {
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("ok");
     return;
   }
+
+  // JSON view of current connections (optionally filter by ?room=NAME)
+  if (pathname === "/connections.json") {
+    const filterRoom = parsed.query?.room ? String(parsed.query.room) : null;
+    const rows = [];
+    wss.clients.forEach((ws) => {
+      if (ws.readyState === ws.OPEN) {
+        const meta = ws.meta || {};
+        if (filterRoom && meta.room !== filterRoom) return;
+        const { name = "anon", ip = "", room = "global" } = meta;
+        const skins = normalizeSkins(ws.skin);
+        rows.push({ room, name, ip, skins });
+      }
+    });
+    const payload = JSON.stringify({ count: rows.length, clients: rows });
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    res.end(payload);
+    return;
+  }
+
+  // Simple HTML table page of current connections
+  if (pathname === "/connections") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>WS Connections</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body{font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; padding:20px;}
+  table{border-collapse:collapse; width:100%; max-width:1100px;}
+  th, td{border:1px solid #ddd; padding:8px; word-break:break-all;}
+  th{background:#f7f7f7; text-align:left;}
+  .muted{opacity:.6}
+  .controls{margin:8px 0 16px}
+  input[type="text"]{padding:6px 8px; width:260px; max-width:100%}
+</style>
+</head>
+<body>
+  <h1>Current WebSocket Connections</h1>
+  <div class="controls">
+    <label>Room filter: <input id="room" type="text" placeholder="(leave blank for all)"></label>
+    <button id="apply">Apply</button>
+    <span class="muted">Auto-refreshes every 2s.</span>
+  </div>
+  <table id="tbl">
+    <thead><tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Skin 1</th><th>Skin 2</th></tr></thead>
+    <tbody></tbody>
+  </table>
+<script>
+let timer;
+async function load() {
+  const room = document.getElementById('room').value.trim();
+  const qs = room ? ('?room=' + encodeURIComponent(room)) : '';
+  try{
+    const r = await fetch('/connections.json' + qs, {cache:'no-store'});
+    const j = await r.json();
+    const tb = document.querySelector('#tbl tbody');
+    tb.innerHTML = '';
+    j.clients.forEach((c, i) => {
+      const tr = document.createElement('tr');
+      const s1 = (c.skins && c.skins[0]) || '';
+      const s2 = (c.skins && c.skins[1]) || '';
+      tr.innerHTML = '<td>'+ (i+1) +'</td>'
+                   + '<td>'+ (c.room || '') +'</td>'
+                   + '<td>'+ (c.name || '') +'</td>'
+                   + '<td>'+ (c.ip || '') +'</td>'
+                   + '<td>'+ (s1 ? '<a href="'+s1+'" target="_blank" rel="noopener">'+s1+'</a>' : '') +'</td>'
+                   + '<td>'+ (s2 ? '<a href="'+s2+'" target="_blank" rel="noopener">'+s2+'</a>' : '') +'</td>';
+      tb.appendChild(tr);
+    });
+    document.title = 'WS Connections ('+ j.count +')';
+  }catch(e){}
+}
+document.getElementById('apply').addEventListener('click', load);
+timer = setInterval(load, 2000);
+load();
+</script>
+</body>
+</html>`);
+    return;
+  }
+
   res.writeHead(404).end();
 });
 
@@ -84,6 +182,10 @@ setInterval(() => {
 }, SERVER_KEEP_MS);
 
 wss.on("connection", (ws, req) => {
+  // Track most recent skins for this socket (for admin view)
+  ws.skin = ["", ""];
+  ws.nameHash = "";
+
   // --- skins bulk snapshot to newcomer (debug)
   if (skinRegistry.size) {
     const data = [...skinRegistry.entries()].map(([h, [s1, s2]]) => [h, s1, s2]);
@@ -104,6 +206,10 @@ wss.on("connection", (ws, req) => {
       if (s1.length > 300 || s2.length > 300) return;
       if (s1 && !/^https?:\/\//i.test(s1)) return;
       if (s2 && !/^https?:\/\//i.test(s2)) return;
+
+      // attach to this connection for the admin view
+      ws.nameHash = m.h;
+      ws.skin = [s1, s2];
 
       skinRegistry.set(m.h, [s1, s2]);
       const payload = JSON.stringify({ t:'skin', op:'update', h: m.h, s1, s2 });
@@ -133,7 +239,7 @@ wss.on("connection", (ws, req) => {
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
 
-  // Optional logs to Replit console (comment out if you want it quiet)
+  // Optional logs to console (comment out if you want it quiet)
   console.log("[join]", name, "room=", room, "ip=", ip);
 
   ws.on("message", (raw) => {

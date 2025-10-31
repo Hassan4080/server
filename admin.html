@@ -2,54 +2,298 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>WS Connections (external)</title>
+  <title>Chat Admin</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body{font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; padding:20px;}
-    label{display:block;margin-bottom:8px}
-    input{padding:6px 8px;width:380px;max-width:100%}
-    table{border-collapse:collapse; width:100%; max-width:1100px; margin-top:14px;}
-    th, td{border:1px solid #ddd; padding:8px; word-break:break-all;}
-    th{background:#f7f7f7; text-align:left;}
-    .muted{opacity:.6}
+    :root{
+      --bg:#0b0b0b; --fg:#f2f2f2; --muted:#9aa0a6; --card:#151515; --border:#2a2a2a; --accent:#4da3ff;
+    }
+    *{box-sizing:border-box}
+    body{margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
+    header{padding:14px 18px; border-bottom:1px solid var(--border); display:flex; gap:14px; align-items:center; flex-wrap:wrap}
+    header h1{font-size:18px; margin:0; font-weight:700}
+    .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    input[type="text"]{padding:8px 10px; background:#0f0f10; border:1px solid var(--border); color:var(--fg); border-radius:8px; width:420px; max-width:100%}
+    button,select{padding:8px 10px; border:1px solid var(--border); background:#121314; color:var(--fg); border-radius:8px; cursor:pointer}
+    button:hover{border-color:#3a3a3a}
+    main{padding:18px}
+    .split{display:grid; grid-template-columns: 1fr 1fr; gap:18px}
+    @media (max-width: 1100px){ .split{grid-template-columns: 1fr} }
+
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden}
+    .card h2{margin:0; padding:10px 12px; border-bottom:1px solid var(--border); font-size:15px}
+    table{border-collapse:collapse; width:100%}
+    th,td{border-top:1px solid var(--border); padding:8px 10px; vertical-align:top}
+    th{background:#121212; text-align:left; position:sticky; top:0}
+    .muted{color:var(--muted)}
+    .rooms{display:grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap:14px; padding:12px}
+    .room{border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#101010; display:flex; flex-direction:column; min-height:260px}
+    .room-h{padding:8px 10px; background:#121212; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center}
+    .room-h b{font-weight:700}
+    .badge{display:inline-block; padding:2px 8px; border-radius:999px; background:#1d2633; color:#bcd7ff; font-size:12px; margin-left:6px}
+    .actions{margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap}
+    .log{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,Menlo,monospace; background:#0b0b0b; color:#e9e9e9;
+         padding:8px 10px; overflow:auto; flex:1; white-space:pre-wrap; word-break:break-word}
+    .line time{color:#8a8a8a; margin-right:6px}
+    .line .from{font-weight:700; margin-right:6px; color:#d7e3ff}
+    a{color:var(--accent); text-decoration:none}
+    a:hover{text-decoration:underline}
   </style>
 </head>
 <body>
-  <h1>Current WebSocket Connections</h1>
-  <label>Server base URL (no trailing slash):
-    <input id="base" value="http://localhost:8080">
-  </label>
-  <p class="muted">Polling every 2s…</p>
-  <table id="tbl">
-    <thead><tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Skin 1</th><th>Skin 2</th></tr></thead>
-    <tbody></tbody>
-  </table>
+  <header>
+    <h1>Chat Admin</h1>
+    <div class="row">
+      <label>Server URL:
+        <input id="base" type="text" placeholder="e.g. https://chat-smge.onrender.com">
+      </label>
+      <button id="applyBase">Apply</button>
+      <span class="muted">Connections poll every 2s. Logs backfill once, then stream live.</span>
+    </div>
+    <div class="row">
+      <label>Filter room:
+        <input id="roomFilter" type="text" placeholder="(leave blank for all)">
+      </label>
+      <button id="applyFilter">Apply</button>
+      <label>Add room:
+        <input id="manualRoom" type="text" placeholder="ffa:party:TAG">
+      </label>
+      <button id="addRoom">Add monitor</button>
+    </div>
+  </header>
+
+  <main class="split">
+    <section class="card">
+      <h2>Connections</h2>
+      <div style="max-height:60vh; overflow:auto">
+        <table id="tbl">
+          <thead>
+            <tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Skin 1</th><th>Skin 2</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Room Logs</h2>
+      <div id="rooms" class="rooms"></div>
+    </section>
+  </main>
+
 <script>
 const baseInput = document.getElementById('base');
-async function load() {
-  const base = baseInput.value.replace(/\/+$/,'');
-  try{
-    const r = await fetch(base + '/connections.json', {cache:'no-store'});
+const applyBaseBtn = document.getElementById('applyBase');
+const filterInput = document.getElementById('roomFilter');
+const applyFilterBtn = document.getElementById('applyFilter');
+const manualRoomInput = document.getElementById('manualRoom');
+const addRoomBtn = document.getElementById('addRoom');
+
+const tableBody = document.querySelector('#tbl tbody');
+const roomsGrid = document.getElementById('rooms');
+
+const sockets = new Map();   // room -> WebSocket
+const paused  = new Map();   // room -> boolean
+const buffers = new Map();   // room -> [{ts,from,text}]
+const hydrated = new Map();  // room -> boolean (history loaded once)
+const MAX_LINES = 500;
+
+function httpBase() { return baseInput.value.replace(/\/+$/,''); }
+function httpToWs(base) {
+  const clean = base.replace(/\/+$/,'');
+  if (/^https:\/\//i.test(clean)) return clean.replace(/^https:/,'wss:') + '/chat';
+  if (/^http:\/\//i.test(clean))  return clean.replace(/^http:/,'ws:')  + '/chat';
+  if (/^wss?:\/\//i.test(clean))  return clean.endsWith('/chat') ? clean : (clean + '/chat');
+  return 'ws://' + clean + '/chat';
+}
+function fmtTime(ts){
+  const d = new Date(ts); const h = String(d.getHours()).padStart(2,'0');
+  const m = String(d.getMinutes()).padStart(2,'0'); const s = String(d.getSeconds()).padStart(2,'0');
+  return `${h}:${m}:${s}`;
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function ensureRoomCard(room) {
+  let card = document.querySelector(`[data-room="${CSS.escape(room)}"]`);
+  if (card) return card;
+
+  card = document.createElement('div');
+  card.className = 'room';
+  card.dataset.room = room;
+  card.innerHTML = `
+    <div class="room-h">
+      <b>${escapeHtml(room)}</b>
+      <span class="badge" data-badge="${escapeHtml(room)}">0</span>
+      <div class="actions">
+        <label><input type="checkbox" data-pause="${escapeHtml(room)}"> Pause</label>
+        <button data-clear="${escapeHtml(room)}">Clear</button>
+        <button data-reconnect="${escapeHtml(room)}">Reconnect</button>
+        <button data-pull="${escapeHtml(room)}">Pull history</button>
+        <button data-wipe="${escapeHtml(room)}">Wipe server logs</button>
+      </div>
+    </div>
+    <div class="log" data-log="${escapeHtml(room)}"></div>
+  `;
+  roomsGrid.appendChild(card);
+
+  card.querySelector(`[data-pause="${CSS.escape(room)}"]`).addEventListener('change', (e)=>{
+    paused.set(room, e.target.checked);
+  });
+  card.querySelector(`[data-clear="${CSS.escape(room)}"]`).addEventListener('click', ()=>{
+    buffers.set(room, []);
+    paintRoom(room);
+  });
+  card.querySelector(`[data-reconnect="${CSS.escape(room)}"]`).addEventListener('click', ()=>{
+    reconnectRoom(room);
+  });
+  card.querySelector(`[data-pull="${CSS.escape(room)}"]`).addEventListener('click', ()=>{
+    hydrateRoom(room, true);
+  });
+  card.querySelector(`[data-wipe="${CSS.escape(room)}"]`).addEventListener('click', async ()=>{
+    try { await fetch(httpBase() + '/logs/clear?room=' + encodeURIComponent(room), { cache:'no-store' }); } catch {}
+    buffers.set(room, []);
+    hydrated.set(room, false);
+    paintRoom(room);
+  });
+
+  return card;
+}
+
+function paintRoom(room){
+  const logEl = document.querySelector(`[data-log="${CSS.escape(room)}"]`);
+  const badge = document.querySelector(`[data-badge="${CSS.escape(room)}"]`);
+  if (!logEl) return;
+  const buf = buffers.get(room) || [];
+  badge.textContent = String(buf.length);
+  logEl.innerHTML = buf.map(m =>
+    `<div class="line"><time>[${fmtTime(m.ts)}]</time><span class="from">${escapeHtml(m.from||'•')}</span>${escapeHtml(m.text||'')}</div>`
+  ).join('');
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function push(room, msg){
+  if (!buffers.has(room)) buffers.set(room, []);
+  const buf = buffers.get(room);
+  buf.push(msg);
+  if (buf.length > MAX_LINES) buf.splice(0, buf.length - MAX_LINES);
+  if (!paused.get(room)) paintRoom(room);
+}
+
+async function hydrateRoom(room, force=false) {
+  if (hydrated.get(room) && !force) return;
+  try {
+    const r = await fetch(httpBase() + '/logs.json?room=' + encodeURIComponent(room), { cache:'no-store' });
     const j = await r.json();
-    const tb = document.querySelector('#tbl tbody');
-    tb.innerHTML = '';
-    j.clients.forEach((c, i) => {
+    if (Array.isArray(j.messages)) {
+      buffers.set(room, j.messages.slice(-MAX_LINES)); // backfill
+      paintRoom(room);
+      hydrated.set(room, true);
+    }
+  } catch {}
+}
+
+function connectRoom(room){
+  if (!sockets.has(room)) {
+    hydrateRoom(room);
+    const wsUrlBase = httpToWs(httpBase());
+    const url = new URL(wsUrlBase);
+    url.searchParams.set('room', room);
+    url.searchParams.set('name', 'Monitor');
+    const ws = new WebSocket(url.toString());
+    sockets.set(room, ws);
+    ensureRoomCard(room);
+
+    ws.onopen = () => { push(room, {ts: Date.now(), from:'•', text:`[monitor] connected to ${room}`}); };
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.type === 'msg') {
+          push(room, {ts: data.ts || Date.now(), from: data.from || '??', text: data.text || ''});
+        } else if (data.type === 'system') {
+          push(room, {ts: Date.now(), from:'•', text: data.text || ''});
+        }
+      } catch {
+        push(room, {ts: Date.now(), from:'•', text: String(ev.data||'')});
+      }
+    };
+    ws.onclose = () => { push(room, {ts: Date.now(), from:'•', text:'[monitor] disconnected'}); sockets.delete(room); };
+    ws.onerror = () => { push(room, {ts: Date.now(), from:'•', text:'[monitor] error'}); };
+  }
+}
+
+function reconnectRoom(room){
+  const ws = sockets.get(room);
+  if (ws) { try{ ws.close(); }catch{} }
+  sockets.delete(room);
+  connectRoom(room);
+}
+
+function closeStaleRooms(currentRooms){
+  for (const [room, ws] of sockets.entries()){
+    if (!currentRooms.has(room)) {
+      try { ws.close(); } catch {}
+      sockets.delete(room);
+    }
+  }
+}
+
+async function loadConnections() {
+  const roomFilter = filterInput.value.trim();
+  const qs = roomFilter ? ('?room=' + encodeURIComponent(roomFilter)) : '';
+  try{
+    const r = await fetch(httpBase() + '/connections.json' + qs, {cache:'no-store'});
+    const j = await r.json();
+
+    tableBody.innerHTML = '';
+    (j.clients || []).forEach((c, i) => {
       const tr = document.createElement('tr');
       const s1 = (c.skins && c.skins[0]) || '';
       const s2 = (c.skins && c.skins[1]) || '';
       tr.innerHTML = '<td>'+ (i+1) +'</td>'
-                   + '<td>'+ (c.room || '') +'</td>'
-                   + '<td>'+ (c.name || '') +'</td>'
-                   + '<td>'+ (c.ip || '') +'</td>'
-                   + '<td>'+ (s1 ? '<a href="'+s1+'" target="_blank" rel="noopener">'+s1+'</a>' : '') +'</td>'
-                   + '<td>'+ (s2 ? '<a href="'+s2+'" target="_blank" rel="noopener">'+s2+'</a>' : '') +'</td>';
-      tb.appendChild(tr);
+                   + '<td>'+ escapeHtml(c.room || '') +'</td>'
+                   + '<td>'+ escapeHtml(c.name || '') +'</td>'
+                   + '<td>'+ escapeHtml(c.ip || '') +'</td>'
+                   + '<td>'+ (s1 ? '<a href="'+escapeHtml(s1)+'" target="_blank" rel="noopener">'+escapeHtml(s1)+'</a>' : '') +'</td>'
+                   + '<td>'+ (s2 ? '<a href="'+escapeHtml(s2)+'" target="_blank" rel="noopener">'+escapeHtml(s2)+'</a>' : '') +'</td>';
+      tableBody.appendChild(tr);
     });
-    document.title = 'WS Connections ('+ j.count +')';
-  }catch(e){}
+    document.title = 'Chat Admin ('+ j.count +')';
+
+    // discover rooms from live connections
+    const discovered = new Set((j.clients || []).map(c => c.room).filter(Boolean));
+    // keep existing manual rooms too
+    sockets.forEach((_, rm) => discovered.add(rm));
+    // connect/ensure cards
+    discovered.forEach(room => { ensureRoomCard(room); connectRoom(room); });
+    closeStaleRooms(discovered);
+
+  }catch(e){
+    // keep UI alive
+  }
 }
-setInterval(load, 2000);
-load();
+
+// Controls
+applyBaseBtn.addEventListener('click', () => {
+  sockets.forEach(ws => { try{ ws.close(); }catch{} });
+  sockets.clear();
+  hydrated.clear();
+  loadConnections();
+});
+applyFilterBtn.addEventListener('click', loadConnections);
+addRoomBtn.addEventListener('click', () => {
+  const rm = manualRoomInput.value.trim();
+  if (!rm) return;
+  ensureRoomCard(rm);
+  connectRoom(rm);
+  manualRoomInput.value = '';
+});
+
+// default Server URL = same origin
+baseInput.value = location.origin;
+
+// start
+setInterval(loadConnections, 2000);
+loadConnections();
 </script>
 </body>
 </html>

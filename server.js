@@ -210,6 +210,32 @@ if (pathname === "/admin" || pathname === "/admin.html") {
   });
   return;
 }
+// === all known rooms (live + with history + optional rooms.json file) ===
+if (pathname === "/rooms.json") {
+  const live = Array.from(rooms.keys());
+  const logged = Array.from(roomLogs.keys());
+
+  // Optional: merge a local rooms.json file { "rooms": ["ffa:global", "macro:global", ...] }
+  let extra = [];
+  try {
+    const p = path.join(process.cwd(), "rooms.json");
+    const txt = fs.readFileSync(p, "utf8");
+    const j = JSON.parse(txt);
+    if (Array.isArray(j.rooms)) extra = j.rooms.map(String);
+  } catch (e) {
+    // no file or invalid json -> ignore
+  }
+
+  const all = Array.from(new Set([...live, ...logged, ...extra])).sort();
+  const payload = JSON.stringify({ count: all.length, rooms: all });
+  res.writeHead(200, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "access-control-allow-origin": "*",
+  });
+  res.end(payload);
+  return;
+}
 
   res.writeHead(404).end();
 });

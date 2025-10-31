@@ -13,8 +13,8 @@
     header{padding:14px 18px; border-bottom:1px solid var(--border); display:flex; gap:14px; align-items:center; flex-wrap:wrap}
     header h1{font-size:18px; margin:0; font-weight:700}
     .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
-    input[type="text"]{padding:8px 10px; background:#0f0f10; border:1px solid var(--border); color:var(--fg); border-radius:8px; width:420px; max-width:100%}
-    button,select{padding:8px 10px; border:1px solid var(--border); background:#121314; color:var(--fg); border-radius:8px; cursor:pointer}
+    input[type="text"]{padding:8px 10px; background:#0f0f10; border:1px solid var(--border); color:#f2f2f2; border-radius:8px; width:420px; max-width:100%}
+    button,select{padding:8px 10px; border:1px solid var(--border); background:#121314; color:#f2f2f2; border-radius:8px; cursor:pointer}
     button:hover{border-color:#3a3a3a}
     main{padding:18px}
     .split{display:grid; grid-template-columns: 1fr 1fr; gap:18px}
@@ -237,9 +237,8 @@ function closeStaleRooms(currentRooms){
   }
 }
 
-
 async function loadConnectionsAndRooms() {
-  // --- 1) connections table (unchanged)
+  // 1) connections table
   const roomFilter = filterInput.value.trim();
   const qs = roomFilter ? ('?room=' + encodeURIComponent(roomFilter)) : '';
   try {
@@ -262,45 +261,39 @@ async function loadConnectionsAndRooms() {
     document.title = 'Chat Admin ('+ j.count +')';
   } catch (e) { /* ignore */ }
 
-  // --- 2) discover all rooms (live + historical)
+  // 2) all rooms (live + history)
   try {
     const rr = await fetch(httpBase() + '/rooms.json', { cache:'no-store' });
     const jr = await rr.json();
     const set = new Set((jr.rooms || []));
 
-    // Optional filter: only open monitors matching filter text
+    // optional filter
     const f = filterInput.value.trim();
     if (f) {
       for (const r of Array.from(set)) if (!r.includes(f)) set.delete(r);
     }
 
-    // ensure monitors for all
     set.forEach(room => { ensureRoomCard(room); connectRoom(room); });
 
-    // close monitors for rooms no longer present (unless user added manually)
+    // close stale
     const current = new Set(set);
-    sockets.forEach((_, rm) => { if (!current.has(rm)) { try { sockets.get(rm)?.close(); }catch{} sockets.delete(rm); } });
-
+    sockets.forEach((_, rm) => {
+      if (!current.has(rm)) {
+        try { sockets.get(rm)?.close(); } catch {}
+        sockets.delete(rm);
+      }
+    });
   } catch (e) { /* ignore */ }
 }
 
-// Wire up: replace your previous interval + calls
-setInterval(loadConnectionsAndRooms, 2000);
-loadConnectionsAndRooms();
-
-catch(e){
-    // keep UI alive
-  }
-}
-
-// Controls
+// controls
 applyBaseBtn.addEventListener('click', () => {
   sockets.forEach(ws => { try{ ws.close(); }catch{} });
   sockets.clear();
   hydrated.clear();
-  loadConnections();
+  loadConnectionsAndRooms();
 });
-applyFilterBtn.addEventListener('click', loadConnections);
+applyFilterBtn.addEventListener('click', loadConnectionsAndRooms);
 addRoomBtn.addEventListener('click', () => {
   const rm = manualRoomInput.value.trim();
   if (!rm) return;
@@ -312,9 +305,9 @@ addRoomBtn.addEventListener('click', () => {
 // default Server URL = same origin
 baseInput.value = location.origin;
 
-// start
-setInterval(loadConnections, 2000);
-loadConnections();
+// tick
+setInterval(loadConnectionsAndRooms, 2000);
+loadConnectionsAndRooms();
 </script>
 </body>
 </html>

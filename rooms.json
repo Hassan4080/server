@@ -1,0 +1,14 @@
+// === all known rooms (live + with history) ===
+if (pathname === "/rooms.json") {
+  const live = Array.from(rooms.keys());
+  const logged = Array.from(roomLogs.keys());
+  const all = Array.from(new Set([...live, ...logged])).sort();
+  const payload = JSON.stringify({ count: all.length, rooms: all });
+  res.writeHead(200, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "access-control-allow-origin": "*",
+  });
+  res.end(payload);
+  return;
+}

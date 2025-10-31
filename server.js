@@ -1,6 +1,7 @@
 // server.js
 // WebSocket chat relay with rooms, rate-limit, heartbeats, and SERVER-SIDE keepalive data frames.
 // Adds /connections (HTML) and /connections.json (JSON) admin views showing: room, name, ip, skins.
+// Extended with rolling chat logs per room: /logs.json and /logs/clear
 
 import http from "node:http";
 import { WebSocketServer } from "ws";
@@ -35,9 +36,29 @@ function allowed(ip) {
   return b.count <= RATE_MAX_MESSAGES;
 }
 
+// --- rolling chat logs per room ---
+const roomLogs = new Map(); // room -> [{ ts, from, text }]
+const MAX_LOGS = Number(process.env.MAX_LOGS || 500);
+
+function appendLog(room, entry) {
+  if (!roomLogs.has(room)) roomLogs.set(room, []);
+  const arr = roomLogs.get(room);
+  arr.push({
+    ts: entry.ts || Date.now(),
+    from: String(entry.from || ""),
+    text: String(entry.text || ""),
+  });
+  if (arr.length > MAX_LOGS) arr.splice(0, arr.length - MAX_LOGS);
+}
+
 // ---------- rooms ----------
 const rooms = new Map(); // roomName -> Set<ws>
 function broadcast(room, payload, except) {
+  // Record only normal chat messages into history
+  if (payload && payload.type === "msg") {
+    appendLog(room, { ts: payload.ts, from: payload.from, text: payload.text });
+  }
+
   const set = rooms.get(room);
   if (!set) return;
   const msg = JSON.stringify(payload);
@@ -61,7 +82,33 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // JSON view of current connections (optionally filter by ?room=NAME)
+  // === Chat log endpoints ===
+  if (pathname === "/logs.json") {
+    const room = (parsed.query?.room ? String(parsed.query.room) : "").slice(0, 128);
+    const msgs = room ? (roomLogs.get(room) || []) : [];
+    const payload = JSON.stringify({ room, count: msgs.length, messages: msgs });
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    res.end(payload);
+    return;
+  }
+
+  if (pathname === "/logs/clear") {
+    const room = (parsed.query?.room ? String(parsed.query.room) : "").slice(0, 128);
+    if (room) roomLogs.set(room, []);
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    res.end(JSON.stringify({ ok: true, room }));
+    return;
+  }
+
+  // === connections.json (for admin table) ===
   if (pathname === "/connections.json") {
     const filterRoom = parsed.query?.room ? String(parsed.query.room) : null;
     const rows = [];
@@ -84,7 +131,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Simple HTML table page of current connections
+  // Simple HTML connections view
   if (pathname === "/connections") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(`<!doctype html>
@@ -155,75 +202,39 @@ load();
 const wss = new WebSocketServer({ server, path: "/chat" });
 
 // ping/pong heartbeat so we can drop dead sockets
-function heartbeat() {
-  this.isAlive = true;
-}
+function heartbeat() { this.isAlive = true; }
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
-    try {
-      ws.ping();
-    } catch {}
+    try { ws.ping(); } catch {}
   });
 }, 30_000);
 
-// SERVER-SIDE KEEPALIVE: send a small DATA frame periodically
-// Some proxies ignore control frames (ping/pong) for idleness.
+// SERVER-SIDE KEEPALIVE frame
 const SERVER_KEEP_MS = 25_000;
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.readyState === ws.OPEN) {
-      try {
-        ws.send('{"type":"srv_keep"}');
-      } catch {}
+      try { ws.send('{"type":"srv_keep"}'); } catch {}
     }
   });
 }, SERVER_KEEP_MS);
 
 wss.on("connection", (ws, req) => {
-  // Track most recent skins for this socket (for admin view)
   ws.skin = ["", ""];
   ws.nameHash = "";
-
-  // --- skins bulk snapshot to newcomer (debug)
-  if (skinRegistry.size) {
-    const data = [...skinRegistry.entries()].map(([h, [s1, s2]]) => [h, s1, s2]);
-    try {
-      ws.send(JSON.stringify({ t: 'skin', op: 'bulk', data }));
-      console.log('[skin][bulk->one] entries=', data.length);
-    } catch (e) { console.warn('[skin][bulk] send failed', e); }
-  }
-
-  // --- hook for skin messages (debug + broadcast-to-all)
-  ws.on('message', (raw) => {
-    let m;
-    try { m = JSON.parse(raw); } catch { return; }
-    if (!m || m.t !== 'skin') return;
-    if (m.op === 'announce' && typeof m.h === 'string') {
-      const s1 = (m.s1 || '').trim();
-      const s2 = (m.s2 || '').trim();
-      if (s1.length > 300 || s2.length > 300) return;
-      if (s1 && !/^https?:\/\//i.test(s1)) return;
-      if (s2 && !/^https?:\/\//i.test(s2)) return;
-
-      // attach to this connection for the admin view
-      ws.nameHash = m.h;
-      ws.skin = [s1, s2];
-
-      skinRegistry.set(m.h, [s1, s2]);
-      const payload = JSON.stringify({ t:'skin', op:'update', h: m.h, s1, s2 });
-      let fanout = 0;
-      wss.clients.forEach(c => {
-        if (c.readyState === 1) { try { c.send(payload); fanout++; } catch {} }
-      });
-      console.log('[skin][announce] h=%s s1=%s s2=%s fanout=%d', m.h, s1, s2, fanout);
-    }
-  });
-
   ws.id = crypto.randomUUID();
   ws.isAlive = true;
   ws.on("pong", heartbeat);
+
+  // --- send bulk skin snapshot to newcomer
+  if (skinRegistry.size) {
+    const data = [...skinRegistry.entries()].map(([h, [s1, s2]]) => [h, s1, s2]);
+    try {
+      ws.send(JSON.stringify({ t: "skin", op: "bulk", data }));
+    } catch {}
+  }
 
   const { query } = url.parse(req.url, true);
   const room = String(query.room || "global").slice(0, 64);
@@ -239,43 +250,47 @@ wss.on("connection", (ws, req) => {
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
 
-  // Optional logs to console (comment out if you want it quiet)
   console.log("[join]", name, "room=", room, "ip=", ip);
 
   ws.on("message", (raw) => {
     let m;
-    try {
-      m = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
+    try { m = JSON.parse(raw.toString()); } catch { return; }
 
-    // Ignore client keepalives (if any)
     if (m.type === "ping" || m.type === "srv_keep") return;
 
     if (m.type === "rename") {
       const old = ws.meta.name;
       ws.meta.name = String(m.name || "anon").slice(0, 24);
-      // silent rename (no broadcast)
       console.log("[rename]", old, "->", ws.meta.name, "room=", room);
       return;
     }
 
     if (m.type === "say") {
-      if (!allowed(ip)) return; // rate-limit
+      if (!allowed(ip)) return;
       const text = String(m.text || "").slice(0, 400);
       if (!text.trim()) return;
-      broadcast(room, {
-        type: "msg",
-        from: ws.meta.name,
-        text,
-        ts: Date.now(),
-      });
+      broadcast(room, { type: "msg", from: ws.meta.name, text, ts: Date.now() });
       console.log("[say]", ws.meta.name + ":", text, "room=", room);
       return;
     }
 
-    // Unknown message type -> ignore silently
+    // --- skin messages (same as before) ---
+    if (m.t === "skin" && m.op === "announce" && typeof m.h === "string") {
+      const s1 = (m.s1 || "").trim();
+      const s2 = (m.s2 || "").trim();
+      if (s1.length > 300 || s2.length > 300) return;
+      if (s1 && !/^https?:\/\//i.test(s1)) return;
+      if (s2 && !/^https?:\/\//i.test(s2)) return;
+      ws.nameHash = m.h;
+      ws.skin = [s1, s2];
+      skinRegistry.set(m.h, [s1, s2]);
+      const payload = JSON.stringify({ t:"skin", op:"update", h:m.h, s1, s2 });
+      let fanout = 0;
+      wss.clients.forEach(c => {
+        if (c.readyState === 1) { try { c.send(payload); fanout++; } catch {} }
+      });
+      console.log("[skin][announce]", m.h, fanout);
+    }
   });
 
   ws.on("close", () => {

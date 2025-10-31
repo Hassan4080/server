@@ -237,11 +237,13 @@ function closeStaleRooms(currentRooms){
   }
 }
 
-async function loadConnections() {
+
+async function loadConnectionsAndRooms() {
+  // --- 1) connections table (unchanged)
   const roomFilter = filterInput.value.trim();
   const qs = roomFilter ? ('?room=' + encodeURIComponent(roomFilter)) : '';
-  try{
-    const r = await fetch(httpBase() + '/connections.json' + qs, {cache:'no-store'});
+  try {
+    const r = await fetch(httpBase() + '/connections.json' + qs, { cache:'no-store' });
     const j = await r.json();
 
     tableBody.innerHTML = '';
@@ -258,16 +260,35 @@ async function loadConnections() {
       tableBody.appendChild(tr);
     });
     document.title = 'Chat Admin ('+ j.count +')';
+  } catch (e) { /* ignore */ }
 
-    // discover rooms from live connections
-    const discovered = new Set((j.clients || []).map(c => c.room).filter(Boolean));
-    // keep existing manual rooms too
-    sockets.forEach((_, rm) => discovered.add(rm));
-    // connect/ensure cards
-    discovered.forEach(room => { ensureRoomCard(room); connectRoom(room); });
-    closeStaleRooms(discovered);
+  // --- 2) discover all rooms (live + historical)
+  try {
+    const rr = await fetch(httpBase() + '/rooms.json', { cache:'no-store' });
+    const jr = await rr.json();
+    const set = new Set((jr.rooms || []));
 
-  }catch(e){
+    // Optional filter: only open monitors matching filter text
+    const f = filterInput.value.trim();
+    if (f) {
+      for (const r of Array.from(set)) if (!r.includes(f)) set.delete(r);
+    }
+
+    // ensure monitors for all
+    set.forEach(room => { ensureRoomCard(room); connectRoom(room); });
+
+    // close monitors for rooms no longer present (unless user added manually)
+    const current = new Set(set);
+    sockets.forEach((_, rm) => { if (!current.has(rm)) { try { sockets.get(rm)?.close(); }catch{} sockets.delete(rm); } });
+
+  } catch (e) { /* ignore */ }
+}
+
+// Wire up: replace your previous interval + calls
+setInterval(loadConnectionsAndRooms, 2000);
+loadConnectionsAndRooms();
+
+catch(e){
     // keep UI alive
   }
 }

@@ -7,6 +7,8 @@ import http from "node:http";
 import { WebSocketServer } from "ws";
 import url from "node:url";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 const PORT = process.env.PORT || 8080;
 
@@ -38,7 +40,7 @@ function allowed(ip) {
 
 // --- rolling chat logs per room ---
 const roomLogs = new Map(); // room -> [{ ts, from, text }]
-const MAX_LOGS = Number(process.env.MAX_LOGS || 500);
+const MAX_LOGS = Number(process.env.MAX_LOGS || 2000);
 
 function appendLog(room, entry) {
   if (!roomLogs.has(room)) roomLogs.set(room, []);
@@ -194,6 +196,20 @@ load();
 </html>`);
     return;
   }
+// Serve admin dashboard (same-origin)
+if (pathname === "/admin" || pathname === "/admin.html") {
+  const file = path.join(process.cwd(), "admin.html"); // put admin.html next to server.js
+  fs.readFile(file, "utf8", (err, data) => {
+    if (err) {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end("admin.html not found");
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    res.end(data);
+  });
+  return;
+}
 
   res.writeHead(404).end();
 });

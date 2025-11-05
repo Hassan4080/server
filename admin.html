@@ -24,14 +24,14 @@
     @media (max-width: 1350px){ .grid3{grid-template-columns: 1fr 1fr} }
     @media (max-width: 980px){ .grid3{grid-template-columns: 1fr} }
 
-    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; min-height:260px}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; min-height:260px; position:relative}
     .card h2{margin:0; padding:10px 12px; border-bottom:1px solid var(--border); font-size:15px}
     table{border-collapse:collapse; width:100%}
     th,td{border-top:1px solid var(--border); padding:8px 10px; vertical-align:top}
     th{background:#121212; text-align:left; position:sticky; top:0}
     .muted{color:var(--muted)}
-    .rooms{display:grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap:14px; padding:12px}
-    .room{border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#101010; display:flex; flex-direction:column; min-height:260px}
+    .rooms{display:grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap:14px; padding:12px; max-height:60vh; overflow:auto}
+    .room{border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#101010; display:flex; flex-direction:column; height:360px}
     .room-h{padding:8px 10px; background:#121212; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center}
     .room-h b{font-weight:700}
     .badge{display:inline-block; padding:2px 8px; border-radius:999px; background:#1d2633; color:#bcd7ff; font-size:12px; margin-left:6px}
@@ -56,6 +56,13 @@
     .btn-ok{border-color:#134a35; background:#0e2a20}
     .list{max-height:54vh; overflow:auto}
     .nowrap{white-space:nowrap}
+
+    /* lock overlay */
+    .lockbox{
+      position:absolute; inset:auto 12px 12px 12px;
+      border:1px dashed var(--border); background:#0b0b0bcc;
+      padding:12px; border-radius:10px; display:flex; gap:10px; align-items:center; justify-content:space-between;
+    }
   </style>
 </head>
 <body>
@@ -82,7 +89,7 @@
 
   <main class="grid3">
     <!-- Connections -->
-    <section class="card">
+    <section class="card" id="connCard">
       <h2>Connections</h2>
       <div style="max-height:60vh; overflow:auto">
         <table id="tbl">
@@ -92,12 +99,26 @@
           <tbody></tbody>
         </table>
       </div>
+      <div class="lockbox" id="connLock" style="display:none">
+        <span class="muted">Locked. Set a <b>Connections Token</b> to view.</span>
+        <div class="row2">
+          <input id="connTokInline" type="password" placeholder="Connections Token">
+          <button id="saveConnTokInline" class="btn-ok">Save</button>
+        </div>
+      </div>
     </section>
 
     <!-- Room Logs -->
-    <section class="card">
+    <section class="card" id="logsCard">
       <h2>Room Logs</h2>
       <div id="rooms" class="rooms"></div>
+      <div class="lockbox" id="logsLock" style="display:none">
+        <span class="muted">Locked. Set a <b>Logs Token</b> to view room logs.</span>
+        <div class="row2">
+          <input id="logsTokInline" type="password" placeholder="Logs Token">
+          <button id="saveLogsTokInline" class="btn-ok">Save</button>
+        </div>
+      </div>
     </section>
 
     <!-- Keys -->
@@ -110,6 +131,20 @@
           </label>
           <button id="saveTok" class="btn-ok">Save</button>
           <span class="hint">Stored in your browser’s localStorage.</span>
+        </div>
+
+        <div class="row2">
+          <label class="nowrap">Connections Token:
+            <input id="connTok" type="password" placeholder="protects connections view">
+          </label>
+          <button id="saveConnTok" class="btn-ok">Save</button>
+        </div>
+
+        <div class="row2">
+          <label class="nowrap">Logs Token:
+            <input id="logsTok" type="password" placeholder="protects logs + monitors">
+          </label>
+          <button id="saveLogsTok" class="btn-ok">Save</button>
         </div>
 
         <div class="row2">
@@ -145,23 +180,7 @@
   </main>
 
 <script>
-/* ======== existing admin (connections + logs) ======== */
-const baseInput = document.getElementById('base');
-const applyBaseBtn = document.getElementById('applyBase');
-const filterInput = document.getElementById('roomFilter');
-const applyFilterBtn = document.getElementById('applyFilter');
-const manualRoomInput = document.getElementById('manualRoom');
-const addRoomBtn = document.getElementById('addRoom');
-
-const tableBody = document.querySelector('#tbl tbody');
-const roomsGrid = document.getElementById('rooms');
-
-const sockets = new Map();   // room -> WebSocket
-const paused  = new Map();   // room -> boolean
-const buffers = new Map();   // room -> [{ts,from,text}]
-const hydrated = new Map();  // room -> boolean (history loaded once)
-const MAX_LINES = 500;
-
+/* ======== helpers/tokens ======== */
 function httpBase() { return baseInput.value.replace(/\/+$/,''); }
 function httpToWs(base) {
   const clean = base.replace(/\/+$/,'');
@@ -177,6 +196,119 @@ function fmtTime(ts){
 }
 function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+function token(){ return localStorage.getItem('chat_admin_token') || ''; }
+function setToken(v){ localStorage.setItem('chat_admin_token', v || ''); }
+function connToken(){ return localStorage.getItem('chat_conn_token') || ''; }
+function setConnToken(v){ localStorage.setItem('chat_conn_token', v || ''); }
+function logsToken(){ return localStorage.getItem('chat_logs_token') || ''; }
+function setLogsToken(v){ localStorage.setItem('chat_logs_token', v || ''); }
+
+/* ======== elements ======== */
+const baseInput = document.getElementById('base');
+const applyBaseBtn = document.getElementById('applyBase');
+const filterInput = document.getElementById('roomFilter');
+const applyFilterBtn = document.getElementById('applyFilter');
+const manualRoomInput = document.getElementById('manualRoom');
+const addRoomBtn = document.getElementById('addRoom');
+
+const tableBody = document.querySelector('#tbl tbody');
+const roomsGrid = document.getElementById('rooms');
+
+const connCard = document.getElementById('connCard');
+const logsCard = document.getElementById('logsCard');
+const connLock = document.getElementById('connLock');
+const logsLock = document.getElementById('logsLock');
+const connTokInline = document.getElementById('connTokInline');
+const logsTokInline = document.getElementById('logsTokInline');
+const saveConnTokInline = document.getElementById('saveConnTokInline');
+const saveLogsTokInline = document.getElementById('saveLogsTokInline');
+
+const tokInput = document.getElementById('admTok');
+const saveTokBtn = document.getElementById('saveTok');
+const connTok = document.getElementById('connTok');
+const saveConnTok = document.getElementById('saveConnTok');
+const logsTok = document.getElementById('logsTok');
+const saveLogsTok = document.getElementById('saveLogsTok');
+
+const keyLabel = document.getElementById('keyLabel');
+const genKeyBtn = document.getElementById('genKey');
+const keyFilter = document.getElementById('keyFilter');
+const refreshKeysBtn = document.getElementById('refreshKeys');
+const keysTbody = document.getElementById('keysTbody');
+const keyMsg = document.getElementById('keyMsg');
+
+/* ======== state & sockets for room monitors ======== */
+const sockets = new Map();   // room -> WebSocket
+const paused  = new Map();   // room -> boolean
+const buffers = new Map();   // room -> [{ts,from,text}]
+const hydrated = new Map();  // room -> boolean (history loaded once)
+const MAX_LINES = 500;
+
+/* ======== lock UI helpers ======== */
+function updateLocks(){
+  const hasConn = !!connToken();
+  const hasLogs = !!logsToken();
+  connLock.style.display = hasConn ? 'none' : 'flex';
+  logsLock.style.display = hasLogs ? 'none' : 'flex';
+  // if locked, clear visible content
+  if (!hasConn){
+    tableBody.innerHTML = '<tr><td colspan="6" class="muted">Locked. Save a Connections Token to view.</td></tr>';
+    document.title = 'Chat Admin';
+  }
+  if (!hasLogs){
+    roomsGrid.innerHTML = '';
+    // also close any existing room sockets for safety
+    sockets.forEach(ws => { try{ ws.close(); }catch{} });
+    sockets.clear();
+  }
+}
+
+/* ======== UI events ======== */
+saveConnTokInline.addEventListener('click', ()=>{
+  setConnToken(connTokInline.value.trim()); connTok.value = connToken(); updateLocks(); loadConnectionsAndRooms();
+});
+saveLogsTokInline.addEventListener('click', ()=>{
+  setLogsToken(logsTokInline.value.trim()); logsTok.value = logsToken(); updateLocks(); loadConnectionsAndRooms();
+});
+
+tokInput.value = token();
+connTok.value = connToken();
+logsTok.value = logsToken();
+
+saveTokBtn.addEventListener('click', ()=>{
+  setToken(tokInput.value.trim());
+  keyMsg.textContent = 'Admin token saved ✔';
+  setTimeout(()=> keyMsg.textContent = '', 1500);
+});
+saveConnTok.addEventListener('click', ()=>{
+  setConnToken(connTok.value.trim());
+  updateLocks(); loadConnectionsAndRooms();
+});
+saveLogsTok.addEventListener('click', ()=>{
+  setLogsToken(logsTok.value.trim());
+  updateLocks(); loadConnectionsAndRooms();
+});
+
+applyBaseBtn.addEventListener('click', () => {
+  sockets.forEach(ws => { try{ ws.close(); }catch{} });
+  sockets.clear();
+  hydrated.clear();
+  loadConnectionsAndRooms();
+});
+applyFilterBtn.addEventListener('click', loadConnectionsAndRooms);
+addRoomBtn.addEventListener('click', () => {
+  if (!logsToken()){ updateLocks(); return; }
+  const rm = manualRoomInput.value.trim();
+  if (!rm) return;
+  ensureRoomCard(rm);
+  connectRoom(rm);
+  manualRoomInput.value = '';
+});
+
+// default Server URL = same origin
+baseInput.value = location.origin;
+
+/* ======== render helpers ======== */
 function ensureRoomCard(room) {
   let card = document.querySelector(`[data-room="${CSS.escape(room)}"]`);
   if (card) return card;
@@ -214,7 +346,12 @@ function ensureRoomCard(room) {
     hydrateRoom(room, true);
   });
   card.querySelector(`[data-wipe="${CSS.escape(room)}"]`).addEventListener('click', async ()=>{
-    try { await fetch(httpBase() + '/logs/clear?room=' + encodeURIComponent(room), { cache:'no-store' }); } catch {}
+    try {
+      await fetch(httpBase() + '/logs/clear?room=' + encodeURIComponent(room), {
+        cache:'no-store',
+        headers:{ 'x-logs-token': logsToken() }
+      });
+    } catch {}
     buffers.set(room, []);
     hydrated.set(room, false);
     paintRoom(room);
@@ -243,10 +380,15 @@ function push(room, msg){
   if (!paused.get(room)) paintRoom(room);
 }
 
+/* ======== data loading ======== */
 async function hydrateRoom(room, force=false) {
+  if (!logsToken()) return;
   if (hydrated.get(room) && !force) return;
   try {
-    const r = await fetch(httpBase() + '/logs.json?room=' + encodeURIComponent(room), { cache:'no-store' });
+    const r = await fetch(httpBase() + '/logs.json?room=' + encodeURIComponent(room), {
+      cache:'no-store',
+      headers:{ 'x-logs-token': logsToken() }
+    });
     const j = await r.json();
     if (Array.isArray(j.messages)) {
       buffers.set(room, j.messages.slice(-MAX_LINES)); // backfill
@@ -257,12 +399,14 @@ async function hydrateRoom(room, force=false) {
 }
 
 function connectRoom(room){
+  if (!logsToken()) return;
   if (!sockets.has(room)) {
     hydrateRoom(room);
     const wsUrlBase = httpToWs(httpBase());
     const url = new URL(wsUrlBase);
     url.searchParams.set('room', room);
     url.searchParams.set('name', 'Monitor');
+    url.searchParams.set('token', logsToken()); // pass logs token to WS
     const ws = new WebSocket(url.toString());
     sockets.set(room, ws);
     ensureRoomCard(room);
@@ -292,84 +436,62 @@ function reconnectRoom(room){
   connectRoom(room);
 }
 
-// controls
-applyBaseBtn.addEventListener('click', () => {
-  sockets.forEach(ws => { try{ ws.close(); }catch{} });
-  sockets.clear();
-  hydrated.clear();
-  loadConnectionsAndRooms();
-});
-applyFilterBtn.addEventListener('click', loadConnectionsAndRooms);
-addRoomBtn.addEventListener('click', () => {
-  const rm = manualRoomInput.value.trim();
-  if (!rm) return;
-  ensureRoomCard(rm);
-  connectRoom(rm);
-  manualRoomInput.value = '';
-});
-
-// default Server URL = same origin
-baseInput.value = location.origin;
-
-/* tick connections/rooms */
 async function loadConnectionsAndRooms() {
-  // 1) connections table
+  updateLocks();
+
   const roomFilter = filterInput.value.trim();
   const qs = roomFilter ? ('?room=' + encodeURIComponent(roomFilter)) : '';
-  try {
-    const r = await fetch(httpBase() + '/connections.json' + qs, { cache:'no-store' });
-    const j = await r.json();
 
-    tableBody.innerHTML = '';
-    (j.clients || []).forEach((c, i) => {
-      const tr = document.createElement('tr');
-      const s1 = (c.skins && c.skins[0]) || '';
-      const s2 = (c.skins && c.skins[1]) || '';
-      tr.innerHTML = '<td>'+ (i+1) +'</td>'
-                   + '<td>'+ escapeHtml(c.room || '') +'</td>'
-                   + '<td>'+ escapeHtml(c.name || '') +'</td>'
-                   + '<td>'+ escapeHtml(c.ip || '') +'</td>'
-                   + '<td>'+ (s1 ? '<a href="'+escapeHtml(s1)+'" target="_blank" rel="noopener">'+escapeHtml(s1)+'</a>' : '') +'</td>'
-                   + '<td>'+ (s2 ? '<a href="'+escapeHtml(s2)+'" target="_blank" rel="noopener">'+escapeHtml(s2)+'</a>' : '') +'</td>';
-      tableBody.appendChild(tr);
-    });
-    document.title = 'Chat Admin ('+ j.count +')';
-  } catch (e) { /* ignore */ }
+  // 1) connections table (gated)
+  if (connToken()){
+    try {
+      const r = await fetch(httpBase() + '/connections.json' + qs, {
+        cache:'no-store',
+        headers:{ 'x-conn-token': connToken() }
+      });
+      const j = await r.json();
+      tableBody.innerHTML = '';
+      (j.clients || []).forEach((c, i) => {
+        const tr = document.createElement('tr');
+        const s1 = (c.skins && c.skins[0]) || '';
+        const s2 = (c.skins && c.skins[1]) || '';
+        tr.innerHTML = '<td>'+ (i+1) +'</td>'
+                     + '<td>'+ escapeHtml(c.room || '') +'</td>'
+                     + '<td>'+ escapeHtml(c.name || '') +'</td>'
+                     + '<td>'+ escapeHtml(c.ip || '') +'</td>'
+                     + '<td>'+ (s1 ? '<a href="'+escapeHtml(s1)+'" target="_blank" rel="noopener">'+escapeHtml(s1)+'</a>' : '') +'</td>'
+                     + '<td>'+ (s2 ? '<a href="'+escapeHtml(s2)+'" target="_blank" rel="noopener">'+escapeHtml(s2)+'</a>' : '') +'</td>';
+        tableBody.appendChild(tr);
+      });
+      if (typeof j.count === 'number') document.title = 'Chat Admin ('+ j.count +')';
+    } catch (e) {
+      tableBody.innerHTML = '<tr><td colspan="6" class="muted">Failed to load (check Connections Token)</td></tr>';
+    }
+  }
 
-  // 2) rooms list -> ensure monitors/reconnect
-  try {
-    const rr = await fetch(httpBase() + '/rooms.json', { cache:'no-store' });
-    const jr = await rr.json();
-    const set = new Set((jr.rooms || []));
-    const f = filterInput.value.trim();
-    if (f) { for (const r of Array.from(set)) if (!r.includes(f)) set.delete(r); }
-    set.forEach(room => { ensureRoomCard(room); connectRoom(room); });
-  } catch (e) { /* ignore */ }
+  // 2) rooms list -> ensure monitors/reconnect (gated)
+  if (logsToken()){
+    try {
+      const rr = await fetch(httpBase() + '/rooms.json', {
+        cache:'no-store',
+        headers:{ 'x-conn-token': connToken() } // if your server wants conn token to list rooms; keep or remove
+      });
+      const jr = await rr.json();
+      const set = new Set((jr.rooms || []));
+      const f = filterInput.value.trim();
+      if (f) { for (const r of Array.from(set)) if (!r.includes(f)) set.delete(r); }
+      set.forEach(room => { ensureRoomCard(room); connectRoom(room); });
+    } catch (e) {
+      // leave grid empty; lock box already visible
+    }
+  }
 }
+
 setInterval(loadConnectionsAndRooms, 2000);
+updateLocks();
 loadConnectionsAndRooms();
 
-/* ======== Keys UI ======== */
-const tokInput = document.getElementById('admTok');
-const saveTokBtn = document.getElementById('saveTok');
-const keyLabel = document.getElementById('keyLabel');
-const genKeyBtn = document.getElementById('genKey');
-const keyFilter = document.getElementById('keyFilter');
-const refreshKeysBtn = document.getElementById('refreshKeys');
-const keysTbody = document.getElementById('keysTbody');
-const keyMsg = document.getElementById('keyMsg');
-
-function token(){ return localStorage.getItem('chat_admin_token') || ''; }
-function setToken(v){ localStorage.setItem('chat_admin_token', v || ''); }
-
-tokInput.value = token();
-
-saveTokBtn.addEventListener('click', ()=>{
-  setToken(tokInput.value.trim());
-  keyMsg.textContent = 'Token saved ✔';
-  setTimeout(()=> keyMsg.textContent = '', 1500);
-});
-
+/* ======== Keys UI (existing) ======== */
 genKeyBtn.addEventListener('click', async ()=>{
   const label = keyLabel.value.trim();
   if (!label) { keyMsg.textContent = 'Enter a label'; return; }

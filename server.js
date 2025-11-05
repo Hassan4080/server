@@ -1,12 +1,11 @@
 // server.js
-// WebSocket chat relay with rooms, rate-limit, heartbeats, and SERVER-SIDE keepalive data frames.
-// Adds /connections (HTML) and /connections.json (JSON) admin views showing: room, name, ip, skins.
-// Extended with rolling chat logs per room: /logs.json and /logs/clear
-// ✅ Extended with key-based gate + instant revocation via SSE:
-//   - POST /validate
-//   - GET  /revocations/stream?key=...
-//   - Admin: GET/POST/DELETE /admin/keys  (x-admin-token required)
-//   Keys are persisted in ./data/keys.json
+// WebSocket chat relay with rooms, rate-limit, heartbeats, and SERVER-SIDE keepalive.
+// Admin views for connections + rolling room logs.
+// Key management with Admin Token, plus key validation & revocation SSE.
+// ✅ Now enforces:
+//   - CONN_TOKEN on /connections.json and /rooms.json
+//   - LOGS_TOKEN on /logs.json, /logs/clear, and WS monitor access when token is present
+// ✅ Keys are persisted in PostgreSQL if DATABASE_URL exists (Render PG). Falls back to /data/keys.json.
 
 import http from "node:http";
 import { WebSocketServer } from "ws";
@@ -15,13 +14,110 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+// === ENV ===
 const PORT = process.env.PORT || 8080;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const CONN_TOKEN  = process.env.CONN_TOKEN  || "";
+const LOGS_TOKEN  = process.env.LOGS_TOKEN  || "";
+const MAX_LOGS    = Number(process.env.MAX_LOGS || 2000);
+const DATABASE_URL = process.env.DATABASE_URL || "";
+
+// -------------------- DB (keys) --------------------
+let KeyStore; // { listKeys, findKey, generateKey, revokeKey }
+
+if (DATABASE_URL) {
+  // PostgreSQL store (Render PG)
+  const { Pool } = await import("pg").then(m => m.default || m);
+  const pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+
+  // ensure table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chat_keys (
+      id SERIAL PRIMARY KEY,
+      label TEXT NOT NULL,
+      key_value TEXT UNIQUE NOT NULL,
+      revoked BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS chat_keys_key_idx ON chat_keys(key_value);
+  `);
+
+  KeyStore = {
+    async listKeys() {
+      const { rows } = await pool.query(
+        `SELECT label, key_value AS key, revoked, created_at AS "createdAt"
+         FROM chat_keys ORDER BY created_at DESC`
+      );
+      return rows;
+    },
+    async findKey(key) {
+      const { rows } = await pool.query(
+        `SELECT label, key_value AS key, revoked, created_at AS "createdAt"
+         FROM chat_keys WHERE key_value = $1 LIMIT 1`, [key]
+      );
+      return rows[0] || null;
+    },
+    async generateKey(label = "") {
+      const key = crypto.randomBytes(16).toString("hex"); // 32 hex
+      const { rows } = await pool.query(
+        `INSERT INTO chat_keys(label, key_value) VALUES($1,$2)
+         RETURNING label, key_value AS key, revoked, created_at AS "createdAt"`,
+        [label, key]
+      );
+      return rows[0];
+    },
+    async revokeKey(key) {
+      const { rowCount } = await pool.query(
+        `UPDATE chat_keys SET revoked = TRUE WHERE key_value = $1`, [key]
+      );
+      return rowCount > 0;
+    }
+  };
+  console.log("[keys] Using PostgreSQL store");
+} else {
+  // JSON file fallback
+  const KEYS_FILE = path.join(process.cwd(), "data", "keys.json");
+  function ensureKeysFile() {
+    const dir = path.dirname(KEYS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(KEYS_FILE)) fs.writeFileSync(KEYS_FILE, "[]");
+  }
+  function readKeys() {
+    ensureKeysFile();
+    try { return JSON.parse(fs.readFileSync(KEYS_FILE, "utf8") || "[]"); }
+    catch { return []; }
+  }
+  function writeKeys(arr) {
+    ensureKeysFile();
+    const tmp = KEYS_FILE + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(arr, null, 2));
+    fs.renameSync(tmp, KEYS_FILE);
+  }
+
+  KeyStore = {
+    async listKeys() { return readKeys(); },
+    async findKey(key) { return readKeys().find(k => k.key === key) || null; },
+    async generateKey(label = "") {
+      const arr = readKeys();
+      const key = crypto.randomBytes(16).toString("hex");
+      const item = { key, label, revoked:false, createdAt:new Date().toISOString() };
+      arr.push(item); writeKeys(arr); return item;
+    },
+    async revokeKey(key) {
+      const arr = readKeys();
+      const i = arr.findIndex(k => k.key === key);
+      if (i < 0) return false;
+      arr[i].revoked = true; writeKeys(arr); return true;
+    }
+  };
+  console.log("[keys] Using file store at ./data/keys.json");
+}
 
 // --- skins: nameHash -> [s1, s2]
 const skinRegistry = new Map();
-
-// Helper to stringify skins safely
 function normalizeSkins(v) {
   if (!v) return ["", ""];
   const [a = "", b = ""] = v;
@@ -46,8 +142,6 @@ function allowed(ip) {
 
 // --- rolling chat logs per room ---
 const roomLogs = new Map(); // room -> [{ ts, from, text }]
-const MAX_LOGS = Number(process.env.MAX_LOGS || 2000);
-
 function appendLog(room, entry) {
   if (!roomLogs.has(room)) roomLogs.set(room, []);
   const arr = roomLogs.get(room);
@@ -62,79 +156,27 @@ function appendLog(room, entry) {
 // ---------- rooms ----------
 const rooms = new Map(); // roomName -> Set<ws>
 function broadcast(room, payload, except) {
-  // Record only normal chat messages into history
   if (payload && payload.type === "msg") {
     appendLog(room, { ts: payload.ts, from: payload.from, text: payload.text });
   }
-
   const set = rooms.get(room);
   if (!set) return;
   const msg = JSON.stringify(payload);
   for (const client of set) {
     if (client !== except && client.readyState === client.OPEN) {
-      try {
-        client.send(msg);
-      } catch {}
+      try { client.send(msg); } catch {}
     }
   }
 }
 
-// =============== KEY STORE (./data/keys.json) ===============
-const KEYS_FILE = path.join(process.cwd(), "data", "keys.json");
-function ensureKeysFile() {
-  const dir = path.dirname(KEYS_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(KEYS_FILE)) fs.writeFileSync(KEYS_FILE, "[]");
-}
-function readKeys() {
-  ensureKeysFile();
-  try {
-    return JSON.parse(fs.readFileSync(KEYS_FILE, "utf8") || "[]");
-  } catch {
-    return [];
-  }
-}
-function writeKeys(arr) {
-  fs.writeFileSync(KEYS_FILE, JSON.stringify(arr, null, 2));
-}
-function listKeys() {
-  return readKeys();
-}
-function findKey(key) {
-  return readKeys().find((k) => k.key === key);
-}
-function generateKey(label = "") {
-  const arr = readKeys();
-  const key = crypto.randomBytes(16).toString("hex"); // 32 hex chars
-  const item = { key, label, revoked: false, createdAt: new Date().toISOString() };
-  arr.push(item);
-  writeKeys(arr);
-  return item;
-}
-function revokeKey(key) {
-  const arr = readKeys();
-  const i = arr.findIndex((k) => k.key === key);
-  if (i < 0) return null;
-  arr[i].revoked = true;
-  writeKeys(arr);
-  return arr[i];
-}
-
 // =============== REVOCATION HUB (SSE) ===============
-/**
- * Keep at most ONE active SSE client per key.
- * New connection for the same key kicks the previous one (single-session policy).
- */
 const sseClients = new Map(); // key -> Set<ServerResponse>
 function addSseClient(key, res) {
   if (!sseClients.has(key)) sseClients.set(key, new Set());
   const set = sseClients.get(key);
-  // kick existing
+  // single-session policy: kick previous
   for (const r of set) {
-    try {
-      r.write(`event: revoked\ndata: {"reason":"duplicate"}\n\n`);
-      r.end();
-    } catch {}
+    try { r.write(`event: revoked\ndata: {"reason":"duplicate"}\n\n`); r.end(); } catch {}
   }
   set.clear();
   set.add(res);
@@ -149,10 +191,7 @@ function broadcastRevoked(key) {
   const set = sseClients.get(key);
   if (!set) return;
   for (const r of set) {
-    try {
-      r.write(`event: revoked\ndata: {}\n\n`);
-      r.end();
-    } catch {}
+    try { r.write(`event: revoked\ndata: {}\n\n`); r.end(); } catch {}
   }
   sseClients.delete(key);
 }
@@ -181,14 +220,35 @@ function readJson(req) {
     let data = "";
     req.on("data", (c) => (data += c));
     req.on("end", () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (e) {
-        reject(e);
-      }
+      try { resolve(data ? JSON.parse(data) : {}); }
+      catch (e) { reject(e); }
     });
     req.on("error", reject);
   });
+}
+
+// ---------- token guards ----------
+function requireAdmin(req, res) {
+  if (!ADMIN_TOKEN || req.headers["x-admin-token"] !== ADMIN_TOKEN) {
+    sendJSON(res, 401, { error: "unauthorized" });
+    return false;
+  }
+  return true;
+}
+function requireConn(req, res) {
+  if (!CONN_TOKEN || req.headers["x-conn-token"] !== CONN_TOKEN) {
+    sendJSON(res, 403, { error: "forbidden" });
+    return false;
+  }
+  return true;
+}
+function requireLogs(req, res) {
+  const tok = req.headers["x-logs-token"] || req.url.includes("?") && new URL(req.url, "http://x").searchParams.get("token");
+  if (!LOGS_TOKEN || tok !== LOGS_TOKEN) {
+    sendJSON(res, 403, { error: "forbidden" });
+    return false;
+  }
+  return true;
 }
 
 // ---------- tiny HTTP (health + admin + keys) ----------
@@ -196,12 +256,12 @@ const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const pathname = parsed.pathname || "/";
 
-  // CORS preflight for our JSON endpoints
+  // CORS preflight
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "access-control-allow-origin": "*",
       "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
-      "access-control-allow-headers": "content-type,x-admin-token",
+      "access-control-allow-headers": "content-type,x-admin-token,x-conn-token,x-logs-token",
       "cache-control": "no-store",
     });
     return res.end();
@@ -211,21 +271,24 @@ const server = http.createServer(async (req, res) => {
     return sendText(res, 200, "ok");
   }
 
-  // === Chat log endpoints ===
+  // === Chat log endpoints (LOGS_TOKEN) ===
   if (pathname === "/logs.json") {
+    if (!requireLogs(req, res)) return;
     const room = (parsed.query?.room ? String(parsed.query.room) : "").slice(0, 128);
     const msgs = room ? (roomLogs.get(room) || []) : [];
     return sendJSON(res, 200, { room, count: msgs.length, messages: msgs });
   }
 
   if (pathname === "/logs/clear") {
+    if (!requireLogs(req, res)) return;
     const room = (parsed.query?.room ? String(parsed.query.room) : "").slice(0, 128);
     if (room) roomLogs.set(room, []);
     return sendJSON(res, 200, { ok: true, room });
   }
 
-  // === connections.json (for admin table) ===
+  // === connections.json (CONN_TOKEN) ===
   if (pathname === "/connections.json") {
+    if (!requireConn(req, res)) return;
     const filterRoom = parsed.query?.room ? String(parsed.query.room) : null;
     const rows = [];
     wss.clients.forEach((ws) => {
@@ -240,99 +303,36 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(res, 200, { count: rows.length, clients: rows });
   }
 
-  // Simple HTML connections view
+  // Simple HTML connections view (no tokens; keep for legacy/manual checks)
   if (pathname === "/connections") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(`<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>WS Connections</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body{font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; padding:20px;}
-  table{border-collapse:collapse; width:100%; max-width:1100px;}
-  th, td{border:1px solid #ddd; padding:8px; word-break:break-all;}
-  th{background:#f7f7f7; text-align:left;}
-  .muted{opacity:.6}
-  .controls{margin:8px 0 16px}
-  input[type="text"]{padding:6px 8px; width:260px; max-width:100%}
-</style>
-</head>
-<body>
-  <h1>Current WebSocket Connections</h1>
-  <div class="controls">
-    <label>Room filter: <input id="room" type="text" placeholder="(leave blank for all)"></label>
-    <button id="apply">Apply</button>
-    <span class="muted">Auto-refreshes every 2s.</span>
-  </div>
-  <table id="tbl">
-    <thead><tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Skin 1</th><th>Skin 2</th></tr></thead>
-    <tbody></tbody>
-  </table>
-<script>
-let timer;
-async function load() {
-  const room = document.getElementById('room').value.trim();
-  const qs = room ? ('?room=' + encodeURIComponent(room)) : '';
-  try{
-    const r = await fetch('/connections.json' + qs, {cache:'no-store'});
-    const j = await r.json();
-    const tb = document.querySelector('#tbl tbody');
-    tb.innerHTML = '';
-    j.clients.forEach((c, i) => {
-      const tr = document.createElement('tr');
-      const s1 = (c.skins && c.skins[0]) || '';
-      const s2 = (c.skins && c.skins[1]) || '';
-      tr.innerHTML = '<td>'+ (i+1) +'</td>'
-                   + '<td>'+ (c.room || '') +'</td>'
-                   + '<td>'+ (c.name || '') +'</td>'
-                   + '<td>'+ (c.ip || '') +'</td>'
-                   + '<td>'+ (s1 ? '<a href="'+s1+'" target="_blank" rel="noopener">'+s1+'</a>' : '') +'</td>'
-                   + '<td>'+ (s2 ? '<a href="'+s2+'" target="_blank" rel="noopener">'+s2+'</a>' : '') +'</td>';
-      tb.appendChild(tr);
-    });
-    document.title = 'WS Connections ('+ j.count +')';
-  }catch(e){}
-}
-document.getElementById('apply').addEventListener('click', load);
-timer = setInterval(load, 2000);
-load();
-</script>
-</body>
-</html>`);
+    res.end(`<!doctype html><meta charset="utf-8"><title>WS Connections</title><body><p>Use /admin.html</p></body>`);
     return;
   }
 
   // Serve admin dashboard (same-origin)
   if (pathname === "/admin" || pathname === "/admin.html") {
-    const file = path.join(process.cwd(), "admin.html"); // put admin.html next to server.js
+    const file = path.join(process.cwd(), "admin.html");
     fs.readFile(file, "utf8", (err, data) => {
-      if (err) {
-        return sendText(res, 500, "admin.html not found");
-      }
+      if (err) return sendText(res, 500, "admin.html not found");
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       res.end(data);
     });
     return;
   }
 
-  // === all known rooms (live + with history + optional rooms.json file) ===
+  // === all known rooms (CONN_TOKEN) ===
   if (pathname === "/rooms.json") {
+    if (!requireConn(req, res)) return;
     const live = Array.from(rooms.keys());
     const logged = Array.from(roomLogs.keys());
-
-    // Optional: merge a local rooms.json file { "rooms": ["ffa:global", "macro:global", ...] }
     let extra = [];
     try {
       const p = path.join(process.cwd(), "rooms.json");
       const txt = fs.readFileSync(p, "utf8");
       const j = JSON.parse(txt);
       if (Array.isArray(j.rooms)) extra = j.rooms.map(String);
-    } catch (e) {
-      // no file or invalid json -> ignore
-    }
-
+    } catch {}
     const all = Array.from(new Set([...live, ...logged, ...extra])).sort();
     return sendJSON(res, 200, { count: all.length, rooms: all });
   }
@@ -344,7 +344,7 @@ load();
     try {
       const body = await readJson(req);
       const key = String(body.key || "");
-      const k = findKey(key);
+      const k = await KeyStore.findKey(key);
       if (!k || k.revoked) return sendJSON(res, 403, { ok: false, reason: "invalid" });
       return sendJSON(res, 200, { ok: true, key: k.key });
     } catch {
@@ -355,7 +355,7 @@ load();
   // GET /revocations/stream?key=...
   if (pathname === "/revocations/stream" && req.method === "GET") {
     const key = String(parsed.query?.key || "");
-    const k = findKey(key);
+    const k = await KeyStore.findKey(key);
     if (!k || k.revoked) {
       res.writeHead(403, {
         "content-type": "text/plain; charset=utf-8",
@@ -364,45 +364,34 @@ load();
       res.end("invalid");
       return;
     }
-
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       "Connection": "keep-alive",
       "access-control-allow-origin": "*",
     });
-    // initial heartbeat
     try { res.write(`data: {"ok":true}\n\n`); } catch {}
-
     addSseClient(key, res);
     const hb = setInterval(() => {
       try { res.write(`data: {"t":${Date.now()}}\n\n`); } catch {}
     }, 25000);
-
-    req.on("close", () => {
-      clearInterval(hb);
-      removeSseClient(key, res);
-    });
+    req.on("close", () => { clearInterval(hb); removeSseClient(key, res); });
     return;
   }
 
   // Admin: GET /admin/keys
   if (pathname === "/admin/keys" && req.method === "GET") {
-    if (!ADMIN_TOKEN || req.headers["x-admin-token"] !== ADMIN_TOKEN) {
-      return sendJSON(res, 401, { error: "unauthorized" });
-    }
-    return sendJSON(res, 200, listKeys());
+    if (!requireAdmin(req, res)) return;
+    return sendJSON(res, 200, await KeyStore.listKeys());
   }
 
   // Admin: POST /admin/keys  body: { label }
   if (pathname === "/admin/keys" && req.method === "POST") {
-    if (!ADMIN_TOKEN || req.headers["x-admin-token"] !== ADMIN_TOKEN) {
-      return sendJSON(res, 401, { error: "unauthorized" });
-    }
+    if (!requireAdmin(req, res)) return;
     try {
       const body = await readJson(req);
       const label = String(body.label || "");
-      const item = generateKey(label);
+      const item = await KeyStore.generateKey(label);
       return sendJSON(res, 201, item);
     } catch {
       return sendJSON(res, 400, { error: "bad_json" });
@@ -411,15 +400,13 @@ load();
 
   // Admin: DELETE /admin/keys  body: { key }
   if (pathname === "/admin/keys" && req.method === "DELETE") {
-    if (!ADMIN_TOKEN || req.headers["x-admin-token"] !== ADMIN_TOKEN) {
-      return sendJSON(res, 401, { error: "unauthorized" });
-    }
+    if (!requireAdmin(req, res)) return;
     try {
       const body = await readJson(req);
       const key = String(body.key || "");
-      const item = revokeKey(key);
-      if (!item) return sendJSON(res, 404, { error: "not_found" });
-      broadcastRevoked(item.key); // push to all clients -> they reload
+      const ok = await KeyStore.revokeKey(key);
+      if (!ok) return sendJSON(res, 404, { error: "not_found" });
+      broadcastRevoked(key); // push to all clients -> they reload
       return sendJSON(res, 200, { ok: true });
     } catch {
       return sendJSON(res, 400, { error: "bad_json" });
@@ -437,17 +424,13 @@ load();
 // ---------- WebSocket ----------
 const wss = new WebSocketServer({ server, path: "/chat" });
 
-// ping/pong heartbeat so we can drop dead sockets
-function heartbeat() {
-  this.isAlive = true;
-}
+// ping/pong heartbeat
+function heartbeat() { this.isAlive = true; }
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
-    try {
-      ws.ping();
-    } catch {}
+    try { ws.ping(); } catch {}
   });
 }, 30_000);
 
@@ -456,9 +439,7 @@ const SERVER_KEEP_MS = 25_000;
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.readyState === ws.OPEN) {
-      try {
-        ws.send('{"type":"srv_keep"}');
-      } catch {}
+      try { ws.send('{"type":"srv_keep"}'); } catch {}
     }
   });
 }, SERVER_KEEP_MS);
@@ -470,19 +451,24 @@ wss.on("connection", (ws, req) => {
   ws.isAlive = true;
   ws.on("pong", heartbeat);
 
-  // --- send bulk skin snapshot to newcomer
+  // skins bulk snapshot to newcomer
   if (skinRegistry.size) {
     const data = [...skinRegistry.entries()].map(([h, [s1, s2]]) => [h, s1, s2]);
-    try {
-      ws.send(JSON.stringify({ t: "skin", op: "bulk", data }));
-    } catch {}
+    try { ws.send(JSON.stringify({ t: "skin", op: "bulk", data })); } catch {}
   }
 
   const { query } = url.parse(req.url, true);
   const room = String(query.room || "global").slice(0, 64);
   const name = String(query.name || "anon").slice(0, 24);
-  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString();
+  const providedToken = query.token ? String(query.token) : null;
 
+  // If a token query is present, enforce it as LOGS_TOKEN (used by admin monitors).
+  if (providedToken !== null && providedToken !== LOGS_TOKEN) {
+    try { ws.close(); } catch {}
+    return;
+  }
+
+  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString();
   ws.meta = { room, name, ip };
 
   if (!rooms.has(room)) rooms.set(room, new Set());
@@ -492,11 +478,7 @@ wss.on("connection", (ws, req) => {
 
   ws.on("message", (raw) => {
     let m;
-    try {
-      m = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
+    try { m = JSON.parse(raw.toString()); } catch { return; }
 
     if (m.type === "ping" || m.type === "srv_keep") return;
 
@@ -516,7 +498,7 @@ wss.on("connection", (ws, req) => {
       return;
     }
 
-    // --- skin messages (same as before) ---
+    // --- skin messages ---
     if (m.t === "skin" && m.op === "announce" && typeof m.h === "string") {
       const s1 = (m.s1 || "").trim();
       const s2 = (m.s2 || "").trim();
@@ -530,10 +512,7 @@ wss.on("connection", (ws, req) => {
       let fanout = 0;
       wss.clients.forEach((c) => {
         if (c.readyState === 1) {
-          try {
-            c.send(payload);
-            fanout++;
-          } catch {}
+          try { c.send(payload); fanout++; } catch {}
         }
       });
       console.log("[skin][announce]", m.h, fanout);
@@ -553,4 +532,6 @@ wss.on("connection", (ws, req) => {
 server.listen(PORT, () => {
   console.log("WS listening on :" + PORT + " (path /chat)");
   if (!ADMIN_TOKEN) console.warn("WARNING: ADMIN_TOKEN not set. Admin endpoints will reject requests.");
+  if (!CONN_TOKEN)  console.warn("WARNING: CONN_TOKEN not set. /connections.json & /rooms.json will be forbidden.");
+  if (!LOGS_TOKEN)  console.warn("WARNING: LOGS_TOKEN not set. /logs.* and monitor token checks will be forbidden.");
 });

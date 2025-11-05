@@ -7,20 +7,24 @@
   <style>
     :root{
       --bg:#0b0b0b; --fg:#f2f2f2; --muted:#9aa0a6; --card:#151515; --border:#2a2a2a; --accent:#4da3ff;
+      --ok:#09b57f; --err:#e24d52; --warn:#e0a84f;
     }
     *{box-sizing:border-box}
     body{margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
     header{padding:14px 18px; border-bottom:1px solid var(--border); display:flex; gap:14px; align-items:center; flex-wrap:wrap}
     header h1{font-size:18px; margin:0; font-weight:700}
     .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
-    input[type="text"]{padding:8px 10px; background:#0f0f10; border:1px solid var(--border); color:#f2f2f2; border-radius:8px; width:420px; max-width:100%}
+    input[type="text"], input[type="search"], input[type="password"]{
+      padding:8px 10px; background:#0f0f10; border:1px solid var(--border); color:#f2f2f2; border-radius:8px; width:420px; max-width:100%
+    }
     button,select{padding:8px 10px; border:1px solid var(--border); background:#121314; color:#f2f2f2; border-radius:8px; cursor:pointer}
     button:hover{border-color:#3a3a3a}
     main{padding:18px}
-    .split{display:grid; grid-template-columns: 1fr 1fr; gap:18px}
-    @media (max-width: 1100px){ .split{grid-template-columns: 1fr} }
+    .grid3{display:grid; grid-template-columns: 1fr 1fr 420px; gap:18px}
+    @media (max-width: 1350px){ .grid3{grid-template-columns: 1fr 1fr} }
+    @media (max-width: 980px){ .grid3{grid-template-columns: 1fr} }
 
-    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; min-height:260px}
     .card h2{margin:0; padding:10px 12px; border-bottom:1px solid var(--border); font-size:15px}
     table{border-collapse:collapse; width:100%}
     th,td{border-top:1px solid var(--border); padding:8px 10px; vertical-align:top}
@@ -38,6 +42,20 @@
     .line .from{font-weight:700; margin-right:6px; color:#d7e3ff}
     a{color:var(--accent); text-decoration:none}
     a:hover{text-decoration:underline}
+
+    /* Keys UI */
+    .stack{display:flex; flex-direction:column; gap:10px; padding:12px}
+    .row2{display:flex; gap:8px; flex-wrap:wrap}
+    .pill{display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px}
+    .pill.active{background:var(--ok); color:#fff}
+    .pill.revoked{background:var(--err); color:#fff}
+    .small{font-size:12px}
+    .hint{color:var(--muted); font-size:12px}
+    .btn-warn{border-color:#4a3818; background:#2a1f0b}
+    .btn-danger{border-color:#4a1818; background:#2a0b0b}
+    .btn-ok{border-color:#134a35; background:#0e2a20}
+    .list{max-height:54vh; overflow:auto}
+    .nowrap{white-space:nowrap}
   </style>
 </head>
 <body>
@@ -62,7 +80,8 @@
     </div>
   </header>
 
-  <main class="split">
+  <main class="grid3">
+    <!-- Connections -->
     <section class="card">
       <h2>Connections</h2>
       <div style="max-height:60vh; overflow:auto">
@@ -75,13 +94,58 @@
       </div>
     </section>
 
+    <!-- Room Logs -->
     <section class="card">
       <h2>Room Logs</h2>
       <div id="rooms" class="rooms"></div>
     </section>
+
+    <!-- Keys -->
+    <section class="card">
+      <h2>Keys</h2>
+      <div class="stack">
+        <div class="row2">
+          <label class="nowrap">Admin Token:
+            <input id="admTok" type="password" placeholder="paste once (stored locally)">
+          </label>
+          <button id="saveTok" class="btn-ok">Save</button>
+          <span class="hint">Stored in your browser’s localStorage.</span>
+        </div>
+
+        <div class="row2">
+          <label>Label:
+            <input id="keyLabel" type="text" placeholder="e.g. Hasan, Friend-1">
+          </label>
+          <button id="genKey" class="btn-ok">Generate</button>
+        </div>
+
+        <div class="row2">
+          <input id="keyFilter" type="search" placeholder="Filter keys (label or key)">
+          <button id="refreshKeys">Refresh</button>
+        </div>
+
+        <div class="list">
+          <table style="width:100%">
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Key</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="keysTbody"></tbody>
+          </table>
+        </div>
+
+        <div id="keyMsg" class="hint"></div>
+      </div>
+    </section>
   </main>
 
 <script>
+/* ======== existing admin (connections + logs) ======== */
 const baseInput = document.getElementById('base');
 const applyBaseBtn = document.getElementById('applyBase');
 const filterInput = document.getElementById('roomFilter');
@@ -228,15 +292,26 @@ function reconnectRoom(room){
   connectRoom(room);
 }
 
-function closeStaleRooms(currentRooms){
-  for (const [room, ws] of sockets.entries()){
-    if (!currentRooms.has(room)) {
-      try { ws.close(); } catch {}
-      sockets.delete(room);
-    }
-  }
-}
+// controls
+applyBaseBtn.addEventListener('click', () => {
+  sockets.forEach(ws => { try{ ws.close(); }catch{} });
+  sockets.clear();
+  hydrated.clear();
+  loadConnectionsAndRooms();
+});
+applyFilterBtn.addEventListener('click', loadConnectionsAndRooms);
+addRoomBtn.addEventListener('click', () => {
+  const rm = manualRoomInput.value.trim();
+  if (!rm) return;
+  ensureRoomCard(rm);
+  connectRoom(rm);
+  manualRoomInput.value = '';
+});
 
+// default Server URL = same origin
+baseInput.value = location.origin;
+
+/* tick connections/rooms */
 async function loadConnectionsAndRooms() {
   // 1) connections table
   const roomFilter = filterInput.value.trim();
@@ -261,53 +336,128 @@ async function loadConnectionsAndRooms() {
     document.title = 'Chat Admin ('+ j.count +')';
   } catch (e) { /* ignore */ }
 
-  // 2) all rooms (live + history)
+  // 2) rooms list -> ensure monitors/reconnect
   try {
     const rr = await fetch(httpBase() + '/rooms.json', { cache:'no-store' });
     const jr = await rr.json();
     const set = new Set((jr.rooms || []));
-
-    // optional filter
     const f = filterInput.value.trim();
-    if (f) {
-      for (const r of Array.from(set)) if (!r.includes(f)) set.delete(r);
-    }
-
+    if (f) { for (const r of Array.from(set)) if (!r.includes(f)) set.delete(r); }
     set.forEach(room => { ensureRoomCard(room); connectRoom(room); });
-
-    // close stale
-    const current = new Set(set);
-    sockets.forEach((_, rm) => {
-      if (!current.has(rm)) {
-        try { sockets.get(rm)?.close(); } catch {}
-        sockets.delete(rm);
-      }
-    });
   } catch (e) { /* ignore */ }
 }
-
-// controls
-applyBaseBtn.addEventListener('click', () => {
-  sockets.forEach(ws => { try{ ws.close(); }catch{} });
-  sockets.clear();
-  hydrated.clear();
-  loadConnectionsAndRooms();
-});
-applyFilterBtn.addEventListener('click', loadConnectionsAndRooms);
-addRoomBtn.addEventListener('click', () => {
-  const rm = manualRoomInput.value.trim();
-  if (!rm) return;
-  ensureRoomCard(rm);
-  connectRoom(rm);
-  manualRoomInput.value = '';
-});
-
-// default Server URL = same origin
-baseInput.value = location.origin;
-
-// tick
 setInterval(loadConnectionsAndRooms, 2000);
 loadConnectionsAndRooms();
+
+/* ======== Keys UI ======== */
+const tokInput = document.getElementById('admTok');
+const saveTokBtn = document.getElementById('saveTok');
+const keyLabel = document.getElementById('keyLabel');
+const genKeyBtn = document.getElementById('genKey');
+const keyFilter = document.getElementById('keyFilter');
+const refreshKeysBtn = document.getElementById('refreshKeys');
+const keysTbody = document.getElementById('keysTbody');
+const keyMsg = document.getElementById('keyMsg');
+
+function token(){ return localStorage.getItem('chat_admin_token') || ''; }
+function setToken(v){ localStorage.setItem('chat_admin_token', v || ''); }
+
+tokInput.value = token();
+
+saveTokBtn.addEventListener('click', ()=>{
+  setToken(tokInput.value.trim());
+  keyMsg.textContent = 'Token saved ✔';
+  setTimeout(()=> keyMsg.textContent = '', 1500);
+});
+
+genKeyBtn.addEventListener('click', async ()=>{
+  const label = keyLabel.value.trim();
+  if (!label) { keyMsg.textContent = 'Enter a label'; return; }
+  keyMsg.textContent = 'Creating...';
+  try{
+    const r = await fetch(httpBase() + '/admin/keys', {
+      method:'POST',
+      headers:{ 'x-admin-token': token(), 'content-type':'application/json' },
+      body: JSON.stringify({ label })
+    });
+    if (!r.ok) throw new Error('unauthorized or server error');
+    const j = await r.json();
+    keyMsg.textContent = 'Key created ✔ (copied)';
+    try { await navigator.clipboard.writeText(j.key); } catch {}
+    keyLabel.value = '';
+    await loadKeys();
+  }catch(e){
+    keyMsg.textContent = 'Error: ' + (e.message || 'failed');
+  } finally {
+    setTimeout(()=> keyMsg.textContent = '', 2000);
+  }
+});
+
+refreshKeysBtn.addEventListener('click', loadKeys);
+keyFilter.addEventListener('input', ()=> renderKeys(window.__keysCache || []));
+
+async function loadKeys(){
+  keyMsg.textContent = 'Loading...';
+  try{
+    const r = await fetch(httpBase() + '/admin/keys', {
+      headers:{ 'x-admin-token': token() }
+    });
+    if (!r.ok) throw new Error('unauthorized or server error');
+    const j = await r.json();
+    window.__keysCache = Array.isArray(j) ? j : [];
+    renderKeys(window.__keysCache);
+    keyMsg.textContent = 'Loaded ✔';
+  }catch(e){
+    keyMsg.textContent = 'Error: ' + (e.message || 'failed');
+  } finally{
+    setTimeout(()=> keyMsg.textContent = '', 1500);
+  }
+}
+
+function renderKeys(list){
+  const q = keyFilter.value.trim().toLowerCase();
+  const rows = (list || []).filter(k=>{
+    if (!q) return true;
+    return (k.label||'').toLowerCase().includes(q) || (k.key||'').toLowerCase().includes(q);
+  }).sort((a,b)=> String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+
+  keysTbody.innerHTML = '';
+  rows.forEach(k=>{
+    const tr = document.createElement('tr');
+    const created = k.createdAt ? new Date(k.createdAt).toLocaleString() : '';
+    tr.innerHTML = `
+      <td>${escapeHtml(k.label || '')}</td>
+      <td class="small">${escapeHtml(k.key || '')}</td>
+      <td>${k.revoked ? '<span class="pill revoked">revoked</span>' : '<span class="pill active">active</span>'}</td>
+      <td class="small">${escapeHtml(created)}</td>
+      <td class="nowrap">
+        <button data-copy>Copy</button>
+        ${k.revoked ? '' : '<button data-revoke class="btn-danger">Revoke</button>'}
+      </td>
+    `;
+    tr.querySelector('[data-copy]').addEventListener('click', async ()=>{
+      try { await navigator.clipboard.writeText(k.key); keyMsg.textContent = 'Copied ✔'; } catch { keyMsg.textContent = 'Copy failed'; }
+      setTimeout(()=> keyMsg.textContent = '', 1200);
+    });
+    const rev = tr.querySelector('[data-revoke]');
+    if (rev) rev.addEventListener('click', async ()=>{
+      if (!confirm('Revoke this key? Active users will be kicked.')) return;
+      try{
+        const r = await fetch(httpBase() + '/admin/keys', {
+          method:'DELETE',
+          headers:{ 'x-admin-token': token(), 'content-type':'application/json' },
+          body: JSON.stringify({ key: k.key })
+        });
+        if (!r.ok) throw new Error('server error');
+        await loadKeys();
+      }catch(e){ keyMsg.textContent = 'Error revoking'; setTimeout(()=> keyMsg.textContent='', 1500); }
+    });
+    keysTbody.appendChild(tr);
+  });
+}
+
+// initial keys load (if token is already saved)
+if (token()) loadKeys();
 </script>
 </body>
 </html>

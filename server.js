@@ -1,8 +1,7 @@
 // server.js
-// WebSocket chat relay with rooms, rate-limit, heartbeats, rolling logs.
-// Key management with Admin Token, key validation, and revocation SSE.
-// Enforces one active session per key via SSE fanout: a new session for a key
-// will immediately notify any previous session for that key to reload/logout.
+// WebSocket chat relay with rooms, rate-limit, heartbeats, keepalive.
+// Admin views + rolling logs. Key management with Admin/Conn/Logs tokens.
+// Adds "key" to /connections.json rows so you can see which key a client used.
 
 import http from "node:http";
 import { WebSocketServer } from "ws";
@@ -11,22 +10,23 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-// ================== ENV ==================
+// === ENV ===
 const PORT         = process.env.PORT || 8080;
-const ADMIN_TOKEN  = process.env.ADMIN_TOKEN || ""; // admin-only endpoints
-const CONN_TOKEN   = process.env.CONN_TOKEN  || ""; // /connections.json, /rooms.json
-const LOGS_TOKEN   = process.env.LOGS_TOKEN  || ""; // /logs.json, /logs/clear and WS monitor
+const ADMIN_TOKEN  = process.env.ADMIN_TOKEN || "";
+const CONN_TOKEN   = process.env.CONN_TOKEN  || "";
+const LOGS_TOKEN   = process.env.LOGS_TOKEN  || "";
 const MAX_LOGS     = Number(process.env.MAX_LOGS || 2000);
-const DATABASE_URL = process.env.DATABASE_URL || ""; // optional (Render PG)
+const DATABASE_URL = process.env.DATABASE_URL || "";
 
-// -------------------- KeyStore --------------------
-let KeyStore;
+// -------------------- DB (keys) --------------------
+let KeyStore; // { listKeys, findKey, generateKey, revokeKey }
+
 if (DATABASE_URL) {
   const { Pool } = await import("pg").then(m => m.default || m);
   const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS chat_keys(
+    CREATE TABLE IF NOT EXISTS chat_keys (
       id SERIAL PRIMARY KEY,
       label TEXT NOT NULL,
       key_value TEXT UNIQUE NOT NULL,
@@ -44,15 +44,15 @@ if (DATABASE_URL) {
       );
       return rows;
     },
-    async findKey(k) {
+    async findKey(key) {
       const { rows } = await pool.query(
         `SELECT label, key_value AS key, revoked, created_at AS "createdAt"
-         FROM chat_keys WHERE key_value = $1 LIMIT 1`, [k]
+         FROM chat_keys WHERE key_value = $1 LIMIT 1`, [key]
       );
       return rows[0] || null;
     },
     async generateKey(label = "") {
-      const key = crypto.randomBytes(16).toString("hex");
+      const key = crypto.randomBytes(16).toString("hex"); // 32 hex
       const { rows } = await pool.query(
         `INSERT INTO chat_keys(label, key_value) VALUES($1,$2)
          RETURNING label, key_value AS key, revoked, created_at AS "createdAt"`,
@@ -60,15 +60,16 @@ if (DATABASE_URL) {
       );
       return rows[0];
     },
-    async revokeKey(k) {
+    async revokeKey(key) {
       const { rowCount } = await pool.query(
-        `UPDATE chat_keys SET revoked = TRUE WHERE key_value = $1`, [k]
+        `UPDATE chat_keys SET revoked = TRUE WHERE key_value = $1`, [key]
       );
       return rowCount > 0;
     }
   };
   console.log("[keys] Using PostgreSQL store");
 } else {
+  // JSON file fallback
   const KEYS_FILE = path.join(process.cwd(), "data", "keys.json");
   function ensureKeysFile() {
     const dir = path.dirname(KEYS_FILE);
@@ -86,64 +87,88 @@ if (DATABASE_URL) {
     fs.writeFileSync(tmp, JSON.stringify(arr, null, 2));
     fs.renameSync(tmp, KEYS_FILE);
   }
+
   KeyStore = {
-    async listKeys()  { return readKeys(); },
-    async findKey(k)  { return readKeys().find(x => x.key === k) || null; },
-    async generateKey(label="") {
+    async listKeys() { return readKeys(); },
+    async findKey(key) { return readKeys().find(k => k.key === key) || null; },
+    async generateKey(label = "") {
       const arr = readKeys();
       const key = crypto.randomBytes(16).toString("hex");
       const item = { key, label, revoked:false, createdAt:new Date().toISOString() };
       arr.push(item); writeKeys(arr); return item;
     },
-    async revokeKey(k) {
+    async revokeKey(key) {
       const arr = readKeys();
-      const i = arr.findIndex(x => x.key === k);
+      const i = arr.findIndex(k => k.key === key);
       if (i < 0) return false;
       arr[i].revoked = true; writeKeys(arr); return true;
     }
   };
-  console.log("[keys] Using file store ./data/keys.json");
+  console.log("[keys] Using file store at ./data/keys.json");
 }
 
-// -------------------- Chat state --------------------
-const skinRegistry = new Map();              // nameHash -> [s1, s2]
-const rooms = new Map();                     // roomName -> Set<ws>
-const roomLogs = new Map();                  // room -> [{ ts, from, text }]
-const RATE_WINDOW_MS = 5_000, RATE_MAX = 12; // per-IP
-const ipBuckets = new Map();                 // ip -> {count, resetAt}
-
+// --- skins: nameHash -> [s1, s2] (left in; unused by admin)
+const skinRegistry = new Map();
 function normalizeSkins(v) {
   if (!v) return ["", ""];
-  const [a="", b=""] = v;
+  const [a = "", b = ""] = v;
   return [String(a), String(b)];
 }
+
+// ---------- simple per-IP rate limit ----------
+const RATE_WINDOW_MS = 5_000;
+const RATE_MAX_MESSAGES = 12;
+const ipBuckets = new Map(); // ip -> {count, resetAt}
 function allowed(ip) {
   const now = Date.now();
   const b = ipBuckets.get(ip) || { count: 0, resetAt: now + RATE_WINDOW_MS };
-  if (now > b.resetAt) { b.count = 0; b.resetAt = now + RATE_WINDOW_MS; }
-  b.count++; ipBuckets.set(ip, b);
-  return b.count <= RATE_MAX;
+  if (now > b.resetAt) {
+    b.count = 0;
+    b.resetAt = now + RATE_WINDOW_MS;
+  }
+  b.count++;
+  ipBuckets.set(ip, b);
+  return b.count <= RATE_MAX_MESSAGES;
 }
+
+// --- rolling chat logs per room ---
+const roomLogs = new Map(); // room -> [{ ts, from, text }]
 function appendLog(room, entry) {
   if (!roomLogs.has(room)) roomLogs.set(room, []);
   const arr = roomLogs.get(room);
-  arr.push({ ts: entry.ts || Date.now(), from: String(entry.from || ""), text: String(entry.text || "") });
+  arr.push({
+    ts: entry.ts || Date.now(),
+    from: String(entry.from || ""),
+    text: String(entry.text || ""),
+  });
   if (arr.length > MAX_LOGS) arr.splice(0, arr.length - MAX_LOGS);
 }
+
+// ---------- rooms ----------
+const rooms = new Map(); // roomName -> Set<ws>
 function broadcast(room, payload, except) {
-  if (payload?.type === "msg") appendLog(room, { ts: payload.ts, from: payload.from, text: payload.text });
-  const set = rooms.get(room); if (!set) return;
+  if (payload && payload.type === "msg") {
+    appendLog(room, { ts: payload.ts, from: payload.from, text: payload.text });
+  }
+  const set = rooms.get(room);
+  if (!set) return;
   const msg = JSON.stringify(payload);
-  for (const client of set) if (client !== except && client.readyState === client.OPEN) { try { client.send(msg); } catch {} }
+  for (const client of set) {
+    if (client !== except && client.readyState === client.OPEN) {
+      try { client.send(msg); } catch {}
+    }
+  }
 }
 
-// -------------------- SSE Revocation Hub (enforces 1 session/key) --------------------
+// =============== REVOCATION HUB (SSE) ===============
 const sseClients = new Map(); // key -> Set<ServerResponse>
 function addSseClient(key, res) {
   if (!sseClients.has(key)) sseClients.set(key, new Set());
   const set = sseClients.get(key);
-  // Enforce single session: revoke any prior listeners
-  for (const r of set) { try { r.write(`event: revoked\ndata: {"reason":"duplicate"}\n\n`); r.end(); } catch {} }
+  // single-session policy: kick previous session for same key
+  for (const r of set) {
+    try { r.write(`event: revoked\ndata: {"reason":"duplicate"}\n\n`); r.end(); } catch {}
+  }
   set.clear();
   set.add(res);
 }
@@ -156,41 +181,70 @@ function removeSseClient(key, res) {
 function broadcastRevoked(key) {
   const set = sseClients.get(key);
   if (!set) return;
-  for (const r of set) { try { r.write(`event: revoked\ndata: {}\n\n`); r.end(); } catch {} }
+  for (const r of set) {
+    try { r.write(`event: revoked\ndata: {}\n\n`); r.end(); } catch {}
+  }
   sseClients.delete(key);
 }
 
-// -------------------- HTTP helpers --------------------
-function sendJSON(res, code, obj, extra={}) {
-  res.writeHead(code, { "content-type": "application/json; charset=utf-8", "cache-control":"no-store", "access-control-allow-origin":"*", ...extra });
+// =============== tiny helpers (native http) ===============
+function sendJSON(res, code, obj, extraHeaders = {}) {
+  res.writeHead(code, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "access-control-allow-origin": "*",
+    ...extraHeaders,
+  });
   res.end(JSON.stringify(obj));
 }
-function sendText(res, code, text, extra={}) {
-  res.writeHead(code, { "content-type": "text/plain; charset=utf-8", "cache-control":"no-store", "access-control-allow-origin":"*", ...extra });
+function sendText(res, code, text, extraHeaders = {}) {
+  res.writeHead(code, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+    "access-control-allow-origin": "*",
+    ...extraHeaders,
+  });
   res.end(text);
 }
 function readJson(req) {
   return new Promise((resolve, reject) => {
-    let data = ""; req.on("data", c => data += c);
-    req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch(e){ reject(e); } });
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => {
+      try { resolve(data ? JSON.parse(data) : {}); }
+      catch (e) { reject(e); }
+    });
     req.on("error", reject);
   });
 }
+
+// ---------- token guards ----------
 function requireAdmin(req, res) {
-  if (!ADMIN_TOKEN || req.headers["x-admin-token"] !== ADMIN_TOKEN) { sendJSON(res, 401, { error:"unauthorized" }); return false; }
+  if (!ADMIN_TOKEN || req.headers["x-admin-token"] !== ADMIN_TOKEN) {
+    sendJSON(res, 401, { error: "unauthorized" });
+    return false;
+  }
   return true;
 }
 function requireConn(req, res) {
-  if (!CONN_TOKEN || req.headers["x-conn-token"] !== CONN_TOKEN) { sendJSON(res, 403, { error:"forbidden" }); return false; }
+  if (!CONN_TOKEN || req.headers["x-conn-token"] !== CONN_TOKEN) {
+    sendJSON(res, 403, { error: "forbidden" });
+    return false;
+  }
   return true;
 }
 function requireLogs(req, res) {
-  const tok = req.headers["x-logs-token"] || (req.url.includes("?") && new URL(req.url, "http://x").searchParams.get("token"));
-  if (!LOGS_TOKEN || tok !== LOGS_TOKEN) { sendJSON(res, 403, { error:"forbidden" }); return false; }
+  // simpler & robust (fixes your deploy error)
+  const u = new URL(req.url, "http://x");
+  const tok = req.headers["x-logs-token"] || u.searchParams.get("token") || "";
+  if (!LOGS_TOKEN || tok !== LOGS_TOKEN) {
+    sendJSON(res, 403, { error: "forbidden" });
+    return false;
+  }
   return true;
 }
 
-// -------------------- HTTP Server --------------------
+// ---------- tiny HTTP (health + admin + keys) ----------
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const pathname = parsed.pathname || "/";
@@ -206,15 +260,18 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  if (pathname === "/" || pathname === "/health") return sendText(res, 200, "ok");
+  if (pathname === "/" || pathname === "/health") {
+    return sendText(res, 200, "ok");
+  }
 
-  // ---- logs (protected) ----
+  // === Chat log endpoints (LOGS_TOKEN) ===
   if (pathname === "/logs.json") {
     if (!requireLogs(req, res)) return;
     const room = (parsed.query?.room ? String(parsed.query.room) : "").slice(0, 128);
     const msgs = room ? (roomLogs.get(room) || []) : [];
     return sendJSON(res, 200, { room, count: msgs.length, messages: msgs });
   }
+
   if (pathname === "/logs/clear") {
     if (!requireLogs(req, res)) return;
     const room = (parsed.query?.room ? String(parsed.query.room) : "").slice(0, 128);
@@ -222,7 +279,7 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(res, 200, { ok: true, room });
   }
 
-  // ---- connections (protected) ----
+  // === connections.json (CONN_TOKEN) ===
   if (pathname === "/connections.json") {
     if (!requireConn(req, res)) return;
     const filterRoom = parsed.query?.room ? String(parsed.query.room) : null;
@@ -238,18 +295,25 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(res, 200, { count: rows.length, clients: rows });
   }
 
-
-    const payload = JSON.stringify({ count: rows.length, clients: rows });
-    res.writeHead(200, {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-      "access-control-allow-origin": "*",
-    });
-    res.end(payload);
+  // Simple HTML connections view (legacy)
+  if (pathname === "/connections") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><meta charset="utf-8"><title>WS Connections</title><body><p>Use /admin.html</p></body>`);
     return;
   }
 
-  // ---- rooms (protected) ----
+  // Serve admin dashboard
+  if (pathname === "/admin" || pathname === "/admin.html") {
+    const file = path.join(process.cwd(), "admin.html");
+    fs.readFile(file, "utf8", (err, data) => {
+      if (err) return sendText(res, 500, "admin.html not found");
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(data);
+    });
+    return;
+  }
+
+  // === all known rooms (CONN_TOKEN) ===
   if (pathname === "/rooms.json") {
     if (!requireConn(req, res)) return;
     const live = Array.from(rooms.keys());
@@ -265,25 +329,30 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(res, 200, { count: all.length, rooms: all });
   }
 
-  // ---- key validate ----
+  // ================= KEY ENDPOINTS =================
+
+  // POST /validate
   if (pathname === "/validate" && req.method === "POST") {
     try {
       const body = await readJson(req);
       const key = String(body.key || "");
-      const found = await KeyStore.findKey(key);
-      if (!found || found.revoked) return sendJSON(res, 403, { ok:false, reason:"invalid" });
-      return sendJSON(res, 200, { ok:true, key: found.key });
+      const k = await KeyStore.findKey(key);
+      if (!k || k.revoked) return sendJSON(res, 403, { ok: false, reason: "invalid" });
+      return sendJSON(res, 200, { ok: true, key: k.key });
     } catch {
-      return sendJSON(res, 400, { ok:false, reason:"bad_json" });
+      return sendJSON(res, 400, { ok: false, reason: "bad_json" });
     }
   }
 
-  // ---- revocation stream (also used to enforce one-session-per-key) ----
+  // GET /revocations/stream?key=...
   if (pathname === "/revocations/stream" && req.method === "GET") {
     const key = String(parsed.query?.key || "");
     const k = await KeyStore.findKey(key);
     if (!k || k.revoked) {
-      res.writeHead(403, { "content-type":"text/plain; charset=utf-8", "access-control-allow-origin":"*" });
+      res.writeHead(403, {
+        "content-type": "text/plain; charset=utf-8",
+        "access-control-allow-origin": "*",
+      });
       res.end("invalid");
       return;
     }
@@ -295,33 +364,41 @@ const server = http.createServer(async (req, res) => {
     });
     try { res.write(`data: {"ok":true}\n\n`); } catch {}
     addSseClient(key, res);
-    const hb = setInterval(() => { try { res.write(`data: {"t":${Date.now()}}\n\n`); } catch {} }, 25000);
+    const hb = setInterval(() => {
+      try { res.write(`data: {"t":${Date.now()}}\n\n`); } catch {}
+    }, 25000);
     req.on("close", () => { clearInterval(hb); removeSseClient(key, res); });
     return;
   }
 
-  // ---- admin key ops ----
+  // Admin: GET /admin/keys
   if (pathname === "/admin/keys" && req.method === "GET") {
     if (!requireAdmin(req, res)) return;
     return sendJSON(res, 200, await KeyStore.listKeys());
   }
+
+  // Admin: POST /admin/keys  body: { label }
   if (pathname === "/admin/keys" && req.method === "POST") {
     if (!requireAdmin(req, res)) return;
     try {
       const body = await readJson(req);
-      const item = await KeyStore.generateKey(String(body.label || ""));
+      const label = String(body.label || "");
+      const item = await KeyStore.generateKey(label);
       return sendJSON(res, 201, item);
     } catch {
       return sendJSON(res, 400, { error: "bad_json" });
     }
   }
+
+  // Admin: DELETE /admin/keys  body: { key }
   if (pathname === "/admin/keys" && req.method === "DELETE") {
     if (!requireAdmin(req, res)) return;
     try {
       const body = await readJson(req);
-      const ok = await KeyStore.revokeKey(String(body.key || ""));
-      if (!ok) return sendJSON(res, 404, { error:"not_found" });
-      broadcastRevoked(String(body.key || ""));
+      const key = String(body.key || "");
+      const ok = await KeyStore.revokeKey(key);
+      if (!ok) return sendJSON(res, 404, { error: "not_found" });
+      broadcastRevoked(key); // push to all clients
       return sendJSON(res, 200, { ok: true });
     } catch {
       return sendJSON(res, 400, { error: "bad_json" });
@@ -329,13 +406,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 404
-  res.writeHead(404, { "content-type":"text/plain; charset=utf-8", "access-control-allow-origin":"*" });
+  res.writeHead(404, {
+    "content-type": "text/plain; charset=utf-8",
+    "access-control-allow-origin": "*",
+  });
   res.end("not found");
 });
 
-// -------------------- WebSocket (/chat) --------------------
+// ---------- WebSocket ----------
 const wss = new WebSocketServer({ server, path: "/chat" });
 
+// ping/pong heartbeat
 function heartbeat() { this.isAlive = true; }
 setInterval(() => {
   wss.clients.forEach((ws) => {
@@ -345,9 +426,14 @@ setInterval(() => {
   });
 }, 30_000);
 
+// SERVER-SIDE KEEPALIVE frame
 const SERVER_KEEP_MS = 25_000;
 setInterval(() => {
-  wss.clients.forEach((ws) => { if (ws.readyState === ws.OPEN) { try { ws.send('{"type":"srv_keep"}'); } catch {} } });
+  wss.clients.forEach((ws) => {
+    if (ws.readyState === ws.OPEN) {
+      try { ws.send('{"type":"srv_keep"}'); } catch {}
+    }
+  });
 }, SERVER_KEEP_MS);
 
 wss.on("connection", (ws, req) => {
@@ -359,30 +445,33 @@ wss.on("connection", (ws, req) => {
 
   if (skinRegistry.size) {
     const data = [...skinRegistry.entries()].map(([h, [s1, s2]]) => [h, s1, s2]);
-    try { ws.send(JSON.stringify({ t:"skin", op:"bulk", data })); } catch {}
+    try { ws.send(JSON.stringify({ t: "skin", op: "bulk", data })); } catch {}
   }
 
   const { query } = url.parse(req.url, true);
   const room = String(query.room || "global").slice(0, 64);
   const name = String(query.name || "anon").slice(0, 24);
   const providedToken = query.token ? String(query.token) : null;
-  const key  = String(query.key  || "").slice(0, 128);
+  const providedKey   = query.key ? String(query.key) : "";
 
-  // Optional: protect monitor sockets with LOGS_TOKEN if a token is present
-  if (providedToken !== null && providedToken !== LOGS_TOKEN) { try { ws.close(); } catch {} return; }
+  // If a token query is present, enforce it as LOGS_TOKEN (used by admin monitors).
+  if (providedToken !== null && providedToken !== LOGS_TOKEN) {
+    try { ws.close(); } catch {}
+    return;
+  }
 
   const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString();
-  ws.meta = { room, name, ip, key };
-
-  
+  ws.meta = { room, name, ip, key: providedKey }; // include key
 
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
 
-  console.log("[join]", name, "room=", room, "ip=", ip);
+  console.log("[join]", name, "room=", room, "ip=", ip, "key=", providedKey ? providedKey.slice(0,6)+"…" : "");
 
   ws.on("message", (raw) => {
-    let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+    let m;
+    try { m = JSON.parse(raw.toString()); } catch { return; }
+
     if (m.type === "ping" || m.type === "srv_keep") return;
 
     if (m.type === "rename") {
@@ -396,11 +485,12 @@ wss.on("connection", (ws, req) => {
       if (!allowed(ip)) return;
       const text = String(m.text || "").slice(0, 400);
       if (!text.trim()) return;
-      broadcast(room, { type:"msg", from: ws.meta.name, text, ts: Date.now() });
+      broadcast(room, { type: "msg", from: ws.meta.name, text, ts: Date.now() });
+      console.log("[say]", ws.meta.name + ":", text, "room=", room);
       return;
     }
 
-    // skin announce (optional)
+    // --- skin messages (optional) ---
     if (m.t === "skin" && m.op === "announce" && typeof m.h === "string") {
       const s1 = (m.s1 || "").trim();
       const s2 = (m.s2 || "").trim();
@@ -410,19 +500,28 @@ wss.on("connection", (ws, req) => {
       ws.nameHash = m.h;
       ws.skin = [s1, s2];
       skinRegistry.set(m.h, [s1, s2]);
-      const payload = JSON.stringify({ t:"skin", op:"update", h:m.h, s1, s2 });
+      const payload = JSON.stringify({ t: "skin", op: "update", h: m.h, s1, s2 });
       let fanout = 0;
-      wss.clients.forEach(c => { if (c.readyState === 1) { try { c.send(payload); fanout++; } catch {} } });
+      wss.clients.forEach((c) => {
+        if (c.readyState === 1) { try { c.send(payload); fanout++; } catch {} }
+      });
       console.log("[skin][announce]", m.h, fanout);
-      return;
     }
   });
 
   ws.on("close", () => {
     const set = rooms.get(room);
-    if (set) { set.delete(ws); if (!set.size) rooms.delete(room); }
+    if (set) {
+      set.delete(ws);
+      if (!set.size) rooms.delete(room);
+    }
     console.log("[leave]", ws.meta.name, "room=", room);
   });
 });
 
-server.listen(PORT, () => console.log("WS listening on :" + PORT + " (path /chat)"));
+server.listen(PORT, () => {
+  console.log("WS listening on :" + PORT + " (path /chat)");
+  if (!ADMIN_TOKEN) console.warn("WARNING: ADMIN_TOKEN not set. Admin endpoints will reject requests.");
+  if (!CONN_TOKEN)  console.warn("WARNING: CONN_TOKEN not set. /connections.json & /rooms.json will be forbidden.");
+  if (!LOGS_TOKEN)  console.warn("WARNING: LOGS_TOKEN not set. /logs.* and monitor token checks will be forbidden.");
+});

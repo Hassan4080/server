@@ -9,26 +9,26 @@
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   input,button{padding:8px 10px;border:1px solid var(--br);border-radius:8px;background:#111;color:#fff}
   button{cursor:pointer} button:hover{border-color:#3a3a3a}
-  main{padding:18px;display:grid;gap:18px;grid-template-columns:1fr 1fr}
-  @media (max-width:1100px){main{grid-template-columns:1fr}}
+  main{padding:18px;display:grid;gap:18px;grid-template-columns:1.2fr 1fr 1fr}
+  @media (max-width:1200px){main{grid-template-columns:1fr}}
   .card{background:var(--card);border:1px solid var(--br);border-radius:12px;overflow:hidden}
   .card h2{margin:0;padding:10px 12px;border-bottom:1px solid var(--br);font-size:15px}
   table{border-collapse:collapse;width:100%}
   th,td{border-top:1px solid var(--br);padding:8px 10px;vertical-align:top}
   th{background:#121212;text-align:left;position:sticky;top:0}
   .mut{color:var(--mut)}
-  .rooms{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:14px;padding:12px}
-  .room{border:1px solid var(--br);border-radius:10px;background:#101010;display:flex;flex-direction:column;min-height:260px}
+  .rooms{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px;padding:12px}
+  .room{border:1px solid var(--br);border-radius:10px;background:#101010;display:flex;flex-direction:column;min-height:240px}
   .room-h{padding:8px 10px;background:#121212;border-bottom:1px solid var(--br);display:flex;gap:8px;align-items:center}
   .badge{padding:2px 8px;border-radius:999px;background:#1d2633;color:#bcd7ff;font-size:12px;margin-left:6px}
   .log{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;background:#0b0b0b;color:#e9e9e9;padding:8px 10px;overflow:auto;white-space:pre-wrap;word-break:break-word}
-  a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
 </style>
+
 <header>
   <div class="row">
-    <b>Server:</b><input id="base" placeholder="https://your-render.onrender.com" style="min-width:360px">
-    <b>CONN_TOKEN:</b><input id="connTok" placeholder="required for /connections.json, /rooms.json">
-    <b>LOGS_TOKEN:</b><input id="logsTok" placeholder="required for logs + WS monitor">
+    <b>Server:</b><input id="base" placeholder="https://chat-smge.onrender.com" style="min-width:360px">
+    <b>CONN_TOKEN:</b><input id="connTok" placeholder="for /connections.json, /rooms.json">
+    <b>LOGS_TOKEN:</b><input id="logsTok" placeholder="for logs + WS monitor">
     <button id="apply">Apply</button>
     <span class="mut">Poll 2s; logs backfill once, then live-stream.</span>
   </div>
@@ -41,6 +41,7 @@
 </header>
 
 <main>
+  <!-- Connections -->
   <section class="card">
     <h2>Connections</h2>
     <div style="max-height:60vh;overflow:auto">
@@ -51,13 +52,40 @@
     </div>
   </section>
 
+  <!-- Logs -->
   <section class="card">
     <h2>Room Logs</h2>
     <div id="rooms" class="rooms"></div>
   </section>
+
+  <!-- Keys -->
+  <section class="card">
+    <h2>Keys</h2>
+    <div style="padding:12px;display:grid;gap:10px">
+      <div class="row">
+        <b>ADMIN_TOKEN:</b><input id="admTok" placeholder="paste once (saved locally)" style="min-width:260px">
+        <button id="saveAdmin">Save</button>
+        <span class="mut">Needed for /admin/keys.</span>
+      </div>
+      <div class="row">
+        <label>Label: <input id="keyLabel" placeholder="e.g. Hasan, Friend-1"></label>
+        <button id="genKey">Generate</button>
+        <button id="refreshKeys">Refresh</button>
+        <input id="keyFilter" placeholder="Filter (label/key)" style="flex:1">
+      </div>
+      <div style="max-height:50vh;overflow:auto">
+        <table>
+          <thead><tr><th>Label</th><th>Key</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody id="keysTbody"></tbody>
+        </table>
+      </div>
+      <div id="keyMsg" class="mut"></div>
+    </div>
+  </section>
 </main>
 
 <script>
+/* ---------- basics ---------- */
 const base   = document.getElementById('base');
 const connEl = document.getElementById('connTok');
 const logsEl = document.getElementById('logsTok');
@@ -69,6 +97,20 @@ const addBtn = document.getElementById('addRoom');
 const tbody  = document.querySelector('#tbl tbody');
 const rooms  = document.getElementById('rooms');
 
+const admTok = document.getElementById('admTok');
+const saveAdmin = document.getElementById('saveAdmin');
+const keyLabel  = document.getElementById('keyLabel');
+const genKeyBtn = document.getElementById('genKey');
+const refreshBtn= document.getElementById('refreshKeys');
+const keyFilter = document.getElementById('keyFilter');
+const keysTbody = document.getElementById('keysTbody');
+const keyMsg    = document.getElementById('keyMsg');
+
+base.value   = localStorage.getItem('admin_base')   || location.origin;
+connEl.value = localStorage.getItem('admin_conn')   || '';
+logsEl.value = localStorage.getItem('admin_logs')   || '';
+admTok.value = localStorage.getItem('admin_token')  || '';
+
 function httpBase(){ return base.value.replace(/\/+$/,''); }
 function httpToWs(b){
   const clean = b.replace(/\/+$/,'');
@@ -78,6 +120,13 @@ function httpToWs(b){
   return 'ws://' + clean + '/chat';
 }
 
+localStorage.setItem('admin_base', base.value);
+base.addEventListener('change', ()=> localStorage.setItem('admin_base', base.value));
+connEl.addEventListener('change', ()=> localStorage.setItem('admin_conn', connEl.value));
+logsEl.addEventListener('change', ()=> localStorage.setItem('admin_logs', logsEl.value));
+saveAdmin.onclick = ()=> { localStorage.setItem('admin_token', admTok.value); keyMsg.textContent='Admin token saved ✔'; setTimeout(()=>keyMsg.textContent='',1200); };
+
+/* ---------- connections + rooms ---------- */
 const sockets  = new Map();
 const buffers  = new Map();
 const hydrated = new Map();
@@ -100,13 +149,13 @@ function card(room){
     </div>
     <div class="log" data-log="${room}"></div>`;
   rooms.appendChild(c);
-  c.querySelector(`[data-pause="${CSS.escape(room)}"]`).onclick = (e)=> paused.set(room, !paused.get(room));
+  c.querySelector(`[data-pause="${CSS.escape(room)}"]`).onclick = ()=> paused.set(room, !paused.get(room));
   c.querySelector(`[data-clear="${CSS.escape(room)}"]`).onclick = ()=>{ buffers.set(room, []); paint(room); };
   c.querySelector(`[data-reco="${CSS.escape(room)}"]`).onclick = ()=> reconnect(room);
   c.querySelector(`[data-pull="${CSS.escape(room)}"]`).onclick = ()=> hydrate(room, true);
   c.querySelector(`[data-wipe="${CSS.escape(room)}"]`).onclick = async ()=>{
     await fetch(httpBase()+'/logs/clear?room='+encodeURIComponent(room), {
-      method:'GET', headers:{'x-logs-token': logsEl.value}, cache:'no-store'
+      headers:{'x-logs-token': logsEl.value}, cache:'no-store'
     });
     buffers.set(room,[]); hydrated.set(room,false); paint(room);
   };
@@ -144,7 +193,7 @@ function connect(room){
   const u = new URL(httpToWs(httpBase()));
   u.searchParams.set('room', room);
   u.searchParams.set('name','Monitor');
-  u.searchParams.set('token', logsEl.value); // prove we’re allowed to monitor
+  u.searchParams.set('token', logsEl.value);
   const ws = new WebSocket(u.toString());
   sockets.set(room, ws);
   card(room);
@@ -194,10 +243,63 @@ async function tick(){
 
 apply.onclick = ()=>{ sockets.forEach(ws=>{ try{ws.close();}catch{} }); sockets.clear(); hydrated.clear(); tick(); };
 applyF.onclick = tick;
-addRoom.onclick = ()=>{ const rm = manual.value.trim(); if (!rm) return; card(rm); connect(rm); manual.value=''; };
+addBtn.onclick = ()=>{ const rm = manual.value.trim(); if (!rm) return; card(rm); connect(rm); manual.value=''; };
 
-// defaults
-base.value = location.origin;
+/* ---------- key admin ---------- */
+function admHeaders(){ return { 'content-type':'application/json', 'x-admin-token': (localStorage.getItem('admin_token')||'') }; }
+
+async function loadKeys(){
+  keysTbody.innerHTML = `<tr><td colspan="5" class="mut">Loading…</td></tr>`;
+  try{
+    const r = await fetch(httpBase()+'/admin/keys', { headers: admHeaders(), cache:'no-store' });
+    if (!r.ok){ keysTbody.innerHTML = `<tr><td colspan="5" class="mut">Unauthorized (check ADMIN_TOKEN)</td></tr>`; return; }
+    const arr = await r.json();
+    const q = keyFilter.value.trim().toLowerCase();
+    const rows = (q ? arr.filter(k => (k.label||'').toLowerCase().includes(q) || (k.key||'').includes(q)) : arr);
+    if (!rows.length){ keysTbody.innerHTML = `<tr><td colspan="5" class="mut">No keys</td></tr>`; return; }
+    keysTbody.innerHTML = rows.map(k => `
+      <tr>
+        <td>${k.label||''}</td>
+        <td><code>${k.key}</code></td>
+        <td>${k.revoked ? 'revoked' : 'active'}</td>
+        <td>${new Date(k.createdAt).toLocaleString()}</td>
+        <td>
+          ${k.revoked ? '' : `<button data-revoke="${k.key}">Revoke</button>`}
+        </td>
+      </tr>`).join('');
+    // wire revoke buttons
+    keysTbody.querySelectorAll('[data-revoke]').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const key = btn.getAttribute('data-revoke');
+        const r2 = await fetch(httpBase()+'/admin/keys', {
+          method:'DELETE', headers: admHeaders(), body: JSON.stringify({ key })
+        });
+        if (r2.ok){ keyMsg.textContent = 'Revoked '+key.slice(0,6)+'…'; loadKeys(); }
+        else keyMsg.textContent = 'Revoke failed';
+        setTimeout(()=> keyMsg.textContent='', 1500);
+      };
+    });
+  }catch{ keysTbody.innerHTML = `<tr><td colspan="5" class="mut">Error loading keys</td></tr>`; }
+}
+
+genKeyBtn.onclick = async ()=>{
+  const label = keyLabel.value.trim();
+  const r = await fetch(httpBase()+'/admin/keys', {
+    method:'POST', headers: admHeaders(), body: JSON.stringify({ label })
+  });
+  if (r.ok){
+    const j = await r.json();
+    keyMsg.textContent = 'Generated: '+j.key; keyLabel.value=''; loadKeys();
+  } else {
+    keyMsg.textContent = 'Generate failed (check ADMIN_TOKEN)';
+  }
+  setTimeout(()=> keyMsg.textContent='', 2500);
+};
+refreshBtn.onclick = loadKeys;
+keyFilter.addEventListener('input', loadKeys);
+
+/* ---------- boot ---------- */
 setInterval(tick, 2000);
 tick();
+loadKeys();
 </script>

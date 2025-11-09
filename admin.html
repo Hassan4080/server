@@ -1,464 +1,203 @@
 <!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Chat Admin</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    :root{
-      --bg:#0b0b0b; --fg:#f2f2f2; --muted:#9aa0a6; --card:#151515; --border:#2a2a2a; --accent:#4da3ff;
-    }
-    *{box-sizing:border-box}
-    body{margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
-    header{padding:14px 18px; border-bottom:1px solid var(--border); display:flex; gap:14px; align-items:center; flex-wrap:wrap}
-    header h1{font-size:18px; margin:0; font-weight:700}
-    .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
-    .row2{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
-    input[type="text"],input[type="password"],input[type="search"]{padding:8px 10px; background:#0f0f10; border:1px solid var(--border); color:#f2f2f2; border-radius:8px; width:320px; max-width:100%}
-    button,select{padding:8px 10px; border:1px solid var(--border); background:#121314; color:#f2f2f2; border-radius:8px; cursor:pointer}
-    button:hover{border-color:#3a3a3a}
-    main{padding:18px}
-    .grid3{display:grid; grid-template-columns: 1.2fr 1fr 1fr; gap:18px}
-    @media (max-width: 1200px){ .grid3{grid-template-columns: 1fr} }
+<meta charset="utf-8">
+<title>Chat Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{--bg:#0b0b0b;--fg:#f2f2f2;--mut:#9aa0a6;--card:#151515;--br:#2a2a2a;--acc:#4da3ff}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  header{padding:14px 18px;border-bottom:1px solid var(--br);display:grid;gap:10px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  input,button{padding:8px 10px;border:1px solid var(--br);border-radius:8px;background:#111;color:#fff}
+  button{cursor:pointer} button:hover{border-color:#3a3a3a}
+  main{padding:18px;display:grid;gap:18px;grid-template-columns:1fr 1fr}
+  @media (max-width:1100px){main{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--br);border-radius:12px;overflow:hidden}
+  .card h2{margin:0;padding:10px 12px;border-bottom:1px solid var(--br);font-size:15px}
+  table{border-collapse:collapse;width:100%}
+  th,td{border-top:1px solid var(--br);padding:8px 10px;vertical-align:top}
+  th{background:#121212;text-align:left;position:sticky;top:0}
+  .mut{color:var(--mut)}
+  .rooms{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:14px;padding:12px}
+  .room{border:1px solid var(--br);border-radius:10px;background:#101010;display:flex;flex-direction:column;min-height:260px}
+  .room-h{padding:8px 10px;background:#121212;border-bottom:1px solid var(--br);display:flex;gap:8px;align-items:center}
+  .badge{padding:2px 8px;border-radius:999px;background:#1d2633;color:#bcd7ff;font-size:12px;margin-left:6px}
+  .log{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;background:#0b0b0b;color:#e9e9e9;padding:8px 10px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+  a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
+</style>
+<header>
+  <div class="row">
+    <b>Server:</b><input id="base" placeholder="https://your-render.onrender.com" style="min-width:360px">
+    <b>CONN_TOKEN:</b><input id="connTok" placeholder="required for /connections.json, /rooms.json">
+    <b>LOGS_TOKEN:</b><input id="logsTok" placeholder="required for logs + WS monitor">
+    <button id="apply">Apply</button>
+    <span class="mut">Poll 2s; logs backfill once, then live-stream.</span>
+  </div>
+  <div class="row">
+    <label>Filter room: <input id="roomFilter" placeholder="(blank = all)"></label>
+    <button id="applyFilter">Apply</button>
+    <label>Add room: <input id="manualRoom" placeholder="ffa:party:TAG"></label>
+    <button id="addRoom">Monitor</button>
+  </div>
+</header>
 
-    .card{position:relative;background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden}
-    .card h2{margin:0; padding:10px 12px; border-bottom:1px solid var(--border); font-size:15px}
-    table{border-collapse:collapse; width:100%}
-    th,td{border-top:1px solid var(--border); padding:8px 10px; vertical-align:top}
-    th{background:#121212; text-align:left; position:sticky; top:0}
-    .muted{color:var(--muted)}
-    .rooms{display:grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap:14px; padding:12px}
-    .room{border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#101010; display:flex; flex-direction:column; min-height:260px}
-    .room-h{padding:8px 10px; background:#121212; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center}
-    .room-h b{font-weight:700}
-    .badge{display:inline-block; padding:2px 8px; border-radius:999px; background:#1d2633; color:#bcd7ff; font-size:12px; margin-left:6px}
-    .actions{margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap}
-    .log{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,Menlo,monospace; background:#0b0b0b; color:#e9e9e9;
-         padding:8px 10px; overflow:auto; flex:1; white-space:pre-wrap; word-break:break-word}
-    .line time{color:#8a8a8a; margin-right:6px}
-    .line .from{font-weight:700; margin-right:6px; color:#d7e3ff}
-    a{color:var(--accent); text-decoration:none}
-    a:hover{text-decoration:underline}
-
-    /* lock overlay */
-    .lockbox{
-      position:absolute; inset:auto 12px 12px 12px;
-      border:1px dashed var(--border); background:#0b0b0bcc;
-      padding:12px; border-radius:10px; display:flex; gap:10px; align-items:center; justify-content:space-between;
-    }
-    .nowrap{white-space:nowrap}
-    .stack{display:flex; flex-direction:column; gap:10px; padding:12px}
-    .hint{color:#9aa0a6}
-    .btn-ok{background:#0f2b4c; border-color:#173d6b}
-  </style>
-</head>
-<body>
-  <header>
-    <h1>Chat Admin</h1>
-    <div class="row">
-      <label>Server URL:
-        <input id="base" type="text" placeholder="e.g. https://chat-smge.onrender.com">
-      </label>
-      <button id="applyBase">Apply</button>
-      <span class="muted">Connections poll every 2s. Logs backfill once, then stream live.</span>
+<main>
+  <section class="card">
+    <h2>Connections</h2>
+    <div style="max-height:60vh;overflow:auto">
+      <table id="tbl">
+        <thead><tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Key</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </div>
-    <div class="row">
-      <label>Filter room:
-        <input id="roomFilter" type="text" placeholder="(leave blank for all)">
-      </label>
-      <button id="applyFilter">Apply</button>
-      <label>Add room:
-        <input id="manualRoom" type="text" placeholder="ffa:party:TAG">
-      </label>
-      <button id="addRoom">Add monitor</button>
-    </div>
-  </header>
+  </section>
 
-  <main class="grid3">
-    <!-- Connections -->
-    <section class="card" id="connCard">
-      <h2>Connections</h2>
-      <div style="max-height:60vh; overflow:auto">
-        <table id="tbl">
-          <thead>
-            <tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Key</th></tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="lockbox" id="connLock" style="display:none">
-        <span class="muted">Locked. Set a <b>Connections Token</b> to view.</span>
-        <div class="row2">
-          <input id="connTokInline" type="password" placeholder="Connections Token">
-          <button id="saveConnTokInline" class="btn-ok">Save</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- Room Logs -->
-    <section class="card" id="logsCard">
-      <h2>Room Logs</h2>
-      <div id="rooms" class="rooms"></div>
-      <div class="lockbox" id="logsLock" style="display:none">
-        <span class="muted">Locked. Set a <b>Logs Token</b> to view room logs.</span>
-        <div class="row2">
-          <input id="logsTokInline" type="password" placeholder="Logs Token">
-          <button id="saveLogsTokInline" class="btn-ok">Save</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- Keys -->
-    <section class="card">
-      <h2>Keys</h2>
-      <div class="stack">
-        <div class="row2">
-          <label class="nowrap">Admin Token:
-            <input id="admTok" type="password" placeholder="paste once (stored locally)">
-          </label>
-          <button id="saveTok" class="btn-ok">Save</button>
-          <span class="hint">Stored in your browser’s localStorage.</span>
-        </div>
-
-        <div class="row2">
-          <label class="nowrap">Connections Token:
-            <input id="connTok" type="password" placeholder="protects connections view">
-          </label>
-          <button id="saveConnTok" class="btn-ok">Save</button>
-        </div>
-
-        <div class="row2">
-          <label class="nowrap">Logs Token:
-            <input id="logsTok" type="password" placeholder="protects logs + monitors">
-          </label>
-          <button id="saveLogsTok" class="btn-ok">Save</button>
-        </div>
-
-        <div class="row2">
-          <label>Label:
-            <input id="keyLabel" type="text" placeholder="e.g. Hasan, Friend-1">
-          </label>
-          <button id="genKey" class="btn-ok">Generate</button>
-        </div>
-
-        <div class="row2">
-          <input id="keyFilter" type="search" placeholder="Filter keys (label or key)">
-          <button id="refreshKeys">Refresh</button>
-        </div>
-
-        <div class="list">
-          <table style="width:100%">
-            <thead>
-              <tr>
-                <th>Label</th>
-                <th>Key</th>
-                <th>Status</th>
-                <th>Created</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="keysTbody"></tbody>
-          </table>
-        </div>
-
-        <div id="keyMsg" class="hint"></div>
-      </div>
-    </section>
-  </main>
+  <section class="card">
+    <h2>Room Logs</h2>
+    <div id="rooms" class="rooms"></div>
+  </section>
+</main>
 
 <script>
-/* ======== helpers/tokens ======== */
-function httpBase() { return baseInput.value.replace(/\/+$/,''); }
-function httpToWs(base) {
-  const clean = base.replace(/\/+$/,'');
+const base   = document.getElementById('base');
+const connEl = document.getElementById('connTok');
+const logsEl = document.getElementById('logsTok');
+const apply  = document.getElementById('apply');
+const filt   = document.getElementById('roomFilter');
+const applyF = document.getElementById('applyFilter');
+const manual = document.getElementById('manualRoom');
+const addBtn = document.getElementById('addRoom');
+const tbody  = document.querySelector('#tbl tbody');
+const rooms  = document.getElementById('rooms');
+
+function httpBase(){ return base.value.replace(/\/+$/,''); }
+function httpToWs(b){
+  const clean = b.replace(/\/+$/,'');
   if (/^https:\/\//i.test(clean)) return clean.replace(/^https:/,'wss:') + '/chat';
   if (/^http:\/\//i.test(clean))  return clean.replace(/^http:/,'ws:')  + '/chat';
   if (/^wss?:\/\//i.test(clean))  return clean.endsWith('/chat') ? clean : (clean + '/chat');
   return 'ws://' + clean + '/chat';
 }
-function token(){ return localStorage.getItem('chat_admin_token') || ''; }
-function setToken(v){ localStorage.setItem('chat_admin_token', v || ''); }
-function connToken(){ return localStorage.getItem('chat_conn_token') || ''; }
-function setConnToken(v){ localStorage.setItem('chat_conn_token', v || ''); }
-function logsToken(){ return localStorage.getItem('chat_logs_token') || ''; }
-function setLogsToken(v){ localStorage.setItem('chat_logs_token', v || ''); }
 
-/* ======== elements ======== */
-const baseInput = document.getElementById('base');
-const applyBaseBtn = document.getElementById('applyBase');
-const filterInput = document.getElementById('roomFilter');
-const applyFilterBtn = document.getElementById('applyFilter');
-const manualRoomInput = document.getElementById('manualRoom');
-const addRoomBtn = document.getElementById('addRoom');
+const sockets  = new Map();
+const buffers  = new Map();
+const hydrated = new Map();
+const paused   = new Map();
+const MAX = 500;
 
-const tableBody = document.querySelector('#tbl tbody');
-const roomsGrid = document.getElementById('rooms');
-
-const connCard = document.getElementById('connCard');
-const logsCard = document.getElementById('logsCard');
-const connLock = document.getElementById('connLock');
-const logsLock = document.getElementById('logsLock');
-const connTokInline = document.getElementById('connTokInline');
-const logsTokInline = document.getElementById('logsTokInline');
-const saveConnTokInline = document.getElementById('saveConnTokInline');
-const saveLogsTokInline = document.getElementById('saveLogsTokInline');
-
-const tokInput = document.getElementById('admTok');
-const saveTokBtn = document.getElementById('saveTok');
-const connTok = document.getElementById('connTok');
-const saveConnTok = document.getElementById('saveConnTok');
-const logsTok = document.getElementById('logsTok');
-const saveLogsTok = document.getElementById('saveLogsTok');
-
-const keyLabel = document.getElementById('keyLabel');
-const genKeyBtn = document.getElementById('genKey');
-const keyFilter = document.getElementById('keyFilter');
-const refreshKeysBtn = document.getElementById('refreshKeys');
-const keysTbody = document.getElementById('keysTbody');
-const keyMsg = document.getElementById('keyMsg');
-
-/* ======== state & sockets for room monitors ======== */
-const sockets = new Map();   // room -> WebSocket
-const paused  = new Map();   // room -> boolean
-const buffers = new Map();   // room -> [{ts,from,text}]
-const hydrated = new Map();  // room -> boolean (history loaded once)
-const MAX_LINES = 500;
-
-/* ======== lock UI helpers ======== */
-function updateLocks(){
-  const hasConn = !!connToken();
-  const hasLogs = !!logsToken();
-  connLock.style.display = hasConn ? 'none' : 'flex';
-  logsLock.style.display = hasLogs ? 'none' : 'flex';
-  if (!hasConn){
-    tableBody.innerHTML = '<tr><td colspan="5" class="muted">Locked. Save a Connections Token to view.</td></tr>';
-    document.title = 'Chat Admin';
-  }
-  if (!hasLogs){
-    roomsGrid.innerHTML = '';
-    sockets.forEach(ws => { try{ ws.close(); }catch{} });
-    sockets.clear();
-  }
-}
-
-/* ======== UI events ======== */
-saveConnTokInline.addEventListener('click', ()=>{
-  setConnToken(connTokInline.value.trim()); connTok.value = connToken(); updateLocks(); loadConnectionsAndRooms();
-});
-saveLogsTokInline.addEventListener('click', ()=>{
-  setLogsToken(logsTokInline.value.trim()); logsTok.value = logsToken(); updateLocks(); loadConnectionsAndRooms();
-});
-
-tokInput.value = token();
-connTok.value = connToken();
-logsTok.value = logsToken();
-
-saveTokBtn.addEventListener('click', ()=>{
-  setToken(tokInput.value.trim());
-  keyMsg.textContent = 'Admin token saved ✔';
-  setTimeout(()=> keyMsg.textContent = '', 1500);
-});
-saveConnTok.addEventListener('click', ()=>{
-  setConnToken(connTok.value.trim());
-  updateLocks(); loadConnectionsAndRooms();
-});
-saveLogsTok.addEventListener('click', ()=>{
-  setLogsToken(logsTok.value.trim());
-  updateLocks(); loadConnectionsAndRooms();
-});
-
-applyBaseBtn.addEventListener('click', () => {
-  sockets.forEach(ws => { try{ ws.close(); }catch{} });
-  sockets.clear();
-  hydrated.clear();
-  loadConnectionsAndRooms();
-});
-applyFilterBtn.addEventListener('click', loadConnectionsAndRooms);
-addRoomBtn.addEventListener('click', () => {
-  if (!logsToken()){ updateLocks(); return; }
-  const rm = manualRoomInput.value.trim();
-  if (!rm) return;
-  ensureRoomCard(rm);
-  connectRoom(rm);
-  manualRoomInput.value = '';
-});
-
-// default Server URL = same origin
-baseInput.value = location.origin;
-
-/* ======== render helpers ======== */
-function ensureRoomCard(room) {
-  let card = document.querySelector(`[data-room="${CSS.escape(room)}"]`);
-  if (card) return card;
-
-  card = document.createElement('div');
-  card.className = 'room';
-  card.dataset.room = room;
-  card.innerHTML = `
-    <div class="room-h">
-      <b>${room}</b>
-      <span class="badge" data-badge="${room}">0</span>
-      <div class="actions">
-        <label><input type="checkbox" data-pause="${room}"> Pause</label>
-        <button data-clear="${room}">Clear</button>
-        <button data-reconnect="${room}">Reconnect</button>
-        <button data-pull="${room}">Pull history</button>
-      </div>
+function card(room){
+  let c = document.querySelector(`[data-room="${CSS.escape(room)}"]`);
+  if (c) return c;
+  c = document.createElement('div');
+  c.className='room'; c.dataset.room = room;
+  c.innerHTML = `
+    <div class="room-h"><b>${room}</b> <span class="badge" data-b="${room}">0</span>
+      <span style="margin-left:auto"></span>
+      <button data-pause="${room}">Pause</button>
+      <button data-clear="${room}">Clear</button>
+      <button data-reco="${room}">Reconnect</button>
+      <button data-pull="${room}">Pull history</button>
+      <button data-wipe="${room}">Wipe server logs</button>
     </div>
-    <div class="log" data-log="${room}"></div>
-  `;
-  roomsGrid.appendChild(card);
-
-  card.querySelector(`[data-pause="${CSS.escape(room)}"]`).addEventListener('change', (e)=>{
-    paused.set(room, e.target.checked);
-  });
-  card.querySelector(`[data-clear="${CSS.escape(room)}"]`).addEventListener('click', ()=>{
-    buffers.set(room, []); paintRoom(room);
-  });
-  card.querySelector(`[data-reconnect="${CSS.escape(room)}"]`).addEventListener('click', ()=>{
-    reconnectRoom(room);
-  });
-  card.querySelector(`[data-pull="${CSS.escape(room)}"]`).addEventListener('click', ()=>{
-    hydrateRoom(room, true);
-  });
-
-  return card;
+    <div class="log" data-log="${room}"></div>`;
+  rooms.appendChild(c);
+  c.querySelector(`[data-pause="${CSS.escape(room)}"]`).onclick = (e)=> paused.set(room, !paused.get(room));
+  c.querySelector(`[data-clear="${CSS.escape(room)}"]`).onclick = ()=>{ buffers.set(room, []); paint(room); };
+  c.querySelector(`[data-reco="${CSS.escape(room)}"]`).onclick = ()=> reconnect(room);
+  c.querySelector(`[data-pull="${CSS.escape(room)}"]`).onclick = ()=> hydrate(room, true);
+  c.querySelector(`[data-wipe="${CSS.escape(room)}"]`).onclick = async ()=>{
+    await fetch(httpBase()+'/logs/clear?room='+encodeURIComponent(room), {
+      method:'GET', headers:{'x-logs-token': logsEl.value}, cache:'no-store'
+    });
+    buffers.set(room,[]); hydrated.set(room,false); paint(room);
+  };
+  return c;
 }
-
-function paintRoom(room){
-  const logEl = document.querySelector(`[data-log="${CSS.escape(room)}"]`);
-  const badge = document.querySelector(`[data-badge="${CSS.escape(room)}"]`);
-  if (!logEl) return;
-  const buf = buffers.get(room) || [];
-  badge.textContent = String(buf.length);
-  logEl.innerHTML = buf.map(m =>
-    `<div class="line"><time>[${fmtTime(m.ts)}]</time><span class="from">${escapeHtml(m.from||'•')}</span>${escapeHtml(m.text||'')}</div>`
-  ).join('');
-  logEl.scrollTop = logEl.scrollHeight;
+function push(room, m){
+  if (!buffers.has(room)) buffers.set(room,[]);
+  const a = buffers.get(room);
+  a.push(m); if (a.length>MAX) a.splice(0,a.length-MAX);
+  if (!paused.get(room)) paint(room);
 }
-
-function fmtTime(ts){
-  const d = new Date(ts); const h = String(d.getHours()).padStart(2,'0');
-  const m = String(d.getMinutes()).padStart(2,'0'); const s = String(d.getSeconds()).padStart(2,'0');
-  return `${h}:${m}:${s}`;
+function paint(room){
+  const log = document.querySelector(`[data-log="${CSS.escape(room)}"]`);
+  const b   = document.querySelector(`[data-b="${CSS.escape(room)}"]`);
+  const arr = buffers.get(room) || [];
+  b.textContent = String(arr.length);
+  log.innerHTML = arr.map(x=>`<div>[${new Date(x.ts).toTimeString().slice(0,8)}] <b>${(x.from||'•')}</b> ${x.text||''}</div>`).join('');
+  log.scrollTop = log.scrollHeight;
 }
-function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-
-function push(room, msg){
-  if (!buffers.has(room)) buffers.set(room, []);
-  const buf = buffers.get(room);
-  buf.push(msg);
-  if (buf.length > MAX_LINES) buf.splice(0, buf.length - MAX_LINES);
-  if (!paused.get(room)) paintRoom(room);
-}
-
-async function hydrateRoom(room, force=false) {
-  if (!logsToken()) return;
+async function hydrate(room, force=false){
   if (hydrated.get(room) && !force) return;
-  try {
-    const r = await fetch(httpBase() + '/logs.json?room=' + encodeURIComponent(room), { cache:'no-store', headers: { 'x-logs-token': logsToken() } });
+  try{
+    const r = await fetch(httpBase()+'/logs.json?room='+encodeURIComponent(room), {
+      headers:{'x-logs-token': logsEl.value}, cache:'no-store'
+    });
     const j = await r.json();
-    if (Array.isArray(j.messages)) {
-      buffers.set(room, j.messages.slice(-MAX_LINES));
-      paintRoom(room);
-      hydrated.set(room, true);
-    }
-  } catch {}
+    buffers.set(room, (j.messages||[]).slice(-MAX));
+    hydrated.set(room,true);
+    paint(room);
+  }catch{}
+}
+function connect(room){
+  if (sockets.has(room)) return;
+  hydrate(room);
+  const u = new URL(httpToWs(httpBase()));
+  u.searchParams.set('room', room);
+  u.searchParams.set('name','Monitor');
+  u.searchParams.set('token', logsEl.value); // prove we’re allowed to monitor
+  const ws = new WebSocket(u.toString());
+  sockets.set(room, ws);
+  card(room);
+  ws.onopen    = ()=> push(room, {ts:Date.now(), from:'•', text:'[monitor] connected'});
+  ws.onclose   = ()=> { push(room,{ts:Date.now(), from:'•', text:'[monitor] disconnected'}); sockets.delete(room); };
+  ws.onerror   = ()=> push(room, {ts:Date.now(), from:'•', text:'[monitor] error'});
+  ws.onmessage = (ev)=>{
+    try{
+      const d = JSON.parse(ev.data);
+      if (d.type==='msg') push(room, {ts: d.ts||Date.now(), from:d.from||'??', text:d.text||''});
+    }catch{ push(room,{ts:Date.now(), from:'•', text:String(ev.data||'')}); }
+  };
+}
+function reconnect(room){ try{ sockets.get(room)?.close(); }catch{} sockets.delete(room); connect(room); }
+
+async function tick(){
+  // connections table
+  const room = filt.value.trim();
+  const qs = room ? ('?room='+encodeURIComponent(room)) : '';
+  try{
+    const r = await fetch(httpBase()+'/connections.json'+qs, {
+      headers:{'x-conn-token': connEl.value}, cache:'no-store'
+    });
+    const j = await r.json();
+    tbody.innerHTML='';
+    (j.clients||[]).forEach((c,i)=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        `<td>${i+1}</td><td>${c.room||''}</td><td>${c.name||''}</td><td>${c.ip||''}</td><td>${c.key||''}</td>`;
+      tbody.appendChild(tr);
+    });
+    document.title = 'Chat Admin ('+ (j.count||0) +')';
+  }catch{}
+
+  // rooms list
+  try{
+    const rr = await fetch(httpBase()+'/rooms.json', {
+      headers:{'x-conn-token': connEl.value}, cache:'no-store'
+    });
+    const jr = await rr.json();
+    const set = new Set(jr.rooms||[]);
+    const f = filt.value.trim(); if (f) { for (const r of [...set]) if (!r.includes(f)) set.delete(r); }
+    set.forEach(rm=>{ card(rm); connect(rm); });
+    for (const [rm] of sockets) if (!set.has(rm)) { try{sockets.get(rm)?.close();}catch{} sockets.delete(rm); }
+  }catch{}
 }
 
-function connectRoom(room){
-  if (!logsToken()) return;
-  if (!sockets.has(room)) {
-    hydrateRoom(room);
-    const wsUrlBase = httpToWs(httpBase());
-    const url = new URL(wsUrlBase);
-    url.searchParams.set('room', room);
-    url.searchParams.set('name', 'Monitor');
-    url.searchParams.set('token', logsToken()); // protect monitor sockets
-    const ws = new WebSocket(url.toString());
-    sockets.set(room, ws);
-    ensureRoomCard(room);
+apply.onclick = ()=>{ sockets.forEach(ws=>{ try{ws.close();}catch{} }); sockets.clear(); hydrated.clear(); tick(); };
+applyF.onclick = tick;
+addRoom.onclick = ()=>{ const rm = manual.value.trim(); if (!rm) return; card(rm); connect(rm); manual.value=''; };
 
-    ws.onopen = () => { push(room, {ts: Date.now(), from:'•', text:`[monitor] connected to ${room}`}); };
-    ws.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        if (data.type === 'msg') {
-          push(room, {ts: data.ts || Date.now(), from: data.from || '??', text: data.text || ''});
-        } else if (data.type === 'system') {
-          push(room, {ts: Date.now(), from:'•', text: data.text || ''});
-        }
-      } catch {
-        push(room, {ts: Date.now(), from:'•', text: String(ev.data||'')});
-      }
-    };
-    ws.onclose = () => { push(room, {ts: Date.now(), from:'•', text:'[monitor] disconnected'}); sockets.delete(room); };
-    ws.onerror = () => { push(room, {ts: Date.now(), from:'•', text:'[monitor] error'}); };
-  }
-}
-
-function reconnectRoom(room){
-  const ws = sockets.get(room);
-  if (ws) { try{ ws.close(); }catch{} }
-  sockets.delete(room);
-  connectRoom(room);
-}
-
-/* ======== connections + rooms polling ======== */
-async function loadConnectionsAndRooms() {
-  updateLocks();
-
-  // 1) connections table (needs CONN_TOKEN)
-  if (connToken()){
-    const roomFilter = filterInput.value.trim();
-    const qs = roomFilter ? ('?room=' + encodeURIComponent(roomFilter)) : '';
-    try {
-      const r = await fetch(httpBase() + '/connections.json' + qs, { cache:'no-store', headers: { 'x-conn-token': connToken() } });
-      const j = await r.json();
-
-      tableBody.innerHTML = '';
-      (j.clients || []).forEach((c, i) => {
-        const tr = document.createElement('tr');
-        tr.innerHTML =
-          '<td>'+ (i+1) +'</td>' +
-          '<td>'+ escapeHtml(c.room || '') +'</td>' +
-          '<td>'+ escapeHtml(c.name || '') +'</td>' +
-          '<td>'+ escapeHtml(c.ip || '') +'</td>' +
-          '<td>'+ escapeHtml(c.key || '') +'</td>';
-        tableBody.appendChild(tr);
-      });
-      document.title = 'Chat Admin ('+ (j.count||0) +')';
-    } catch (e) {
-      tableBody.innerHTML = '<tr><td colspan="5" class="muted">Error loading connections</td></tr>';
-    }
-  }
-
-  // 2) all rooms (live + history)
-  if (logsToken()){
-    try {
-      const rr = await fetch(httpBase() + '/rooms.json', { cache:'no-store', headers: { 'x-conn-token': connToken() } });
-      const jr = await rr.json();
-      const set = new Set((jr.rooms || []));
-      const f = filterInput.value.trim();
-      if (f) { for (const r of Array.from(set)) if (!r.includes(f)) set.delete(r); }
-      set.forEach(room => { ensureRoomCard(room); connectRoom(room); });
-
-      // close stale
-      const current = new Set(set);
-      sockets.forEach((_, rm) => {
-        if (!current.has(rm)) {
-          try { sockets.get(rm)?.close(); } catch {}
-          sockets.delete(rm);
-        }
-      });
-    } catch {}
-  }
-}
-
-// init
-updateLocks();
-setInterval(loadConnectionsAndRooms, 2000);
-loadConnectionsAndRooms();
+// defaults
+base.value = location.origin;
+setInterval(tick, 2000);
+tick();
 </script>
-</body>
-</html>

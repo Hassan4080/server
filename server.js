@@ -231,26 +231,14 @@ const server = http.createServer(async (req, res) => {
       if (ws.readyState === ws.OPEN) {
         const meta = ws.meta || {};
         if (filterRoom && meta.room !== filterRoom) return;
-        const { name = "anon", ip = "", room = "global" } = meta;
-        const skins = normalizeSkins(ws.skin);
-        rows.push({ room, name, ip, skins });
+        const { name = "anon", ip = "", room = "global", key = "" } = meta;
+        rows.push({ room, name, ip, key });
       }
     });
     return sendJSON(res, 200, { count: rows.length, clients: rows });
   }
 
-  // Simple HTML stub (use your admin page file)
-  if (pathname === "/admin" || pathname === "/admin.html") {
-    const filterRoom = parsed.query?.room ? String(parsed.query.room) : null;
-    const rows = [];
-    wss.clients.forEach((ws) => {
-      if (ws.readyState === ws.OPEN) {
-        const meta = ws.meta || {};
-        if (filterRoom && meta.room !== filterRoom) return;
-        const { name = "anon", ip = "", room = "global", key = "" } = meta;
-        rows.push({ room, name, ip, key });
-      }
-    });
+
     const payload = JSON.stringify({ count: rows.length, clients: rows });
     res.writeHead(200, {
       "content-type": "application/json; charset=utf-8",

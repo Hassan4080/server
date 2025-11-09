@@ -241,12 +241,23 @@ const server = http.createServer(async (req, res) => {
 
   // Simple HTML stub (use your admin page file)
   if (pathname === "/admin" || pathname === "/admin.html") {
-    const file = path.join(process.cwd(), "admin.html");
-    fs.readFile(file, "utf8", (err, data) => {
-      if (err) return sendText(res, 500, "admin.html not found");
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control":"no-store" });
-      res.end(data);
+    const filterRoom = parsed.query?.room ? String(parsed.query.room) : null;
+    const rows = [];
+    wss.clients.forEach((ws) => {
+      if (ws.readyState === ws.OPEN) {
+        const meta = ws.meta || {};
+        if (filterRoom && meta.room !== filterRoom) return;
+        const { name = "anon", ip = "", room = "global", key = "" } = meta;
+        rows.push({ room, name, ip, key });
+      }
     });
+    const payload = JSON.stringify({ count: rows.length, clients: rows });
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    res.end(payload);
     return;
   }
 
@@ -367,12 +378,15 @@ wss.on("connection", (ws, req) => {
   const room = String(query.room || "global").slice(0, 64);
   const name = String(query.name || "anon").slice(0, 24);
   const providedToken = query.token ? String(query.token) : null;
+  const key  = String(query.key  || "").slice(0, 128);
 
   // Optional: protect monitor sockets with LOGS_TOKEN if a token is present
   if (providedToken !== null && providedToken !== LOGS_TOKEN) { try { ws.close(); } catch {} return; }
 
   const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString();
-  ws.meta = { room, name, ip };
+  ws.meta = { room, name, ip, key };
+
+  
 
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);

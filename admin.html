@@ -94,7 +94,7 @@
       <div style="max-height:60vh; overflow:auto">
         <table id="tbl">
           <thead>
-            <tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Skin 1</th><th>Skin 2</th></tr>
+            <tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Key</th></tr>
           </thead>
           <tbody></tbody>
         </table>
@@ -453,14 +453,14 @@ async function loadConnectionsAndRooms() {
       tableBody.innerHTML = '';
       (j.clients || []).forEach((c, i) => {
         const tr = document.createElement('tr');
-        const s1 = (c.skins && c.skins[0]) || '';
-        const s2 = (c.skins && c.skins[1]) || '';
-        tr.innerHTML = '<td>'+ (i+1) +'</td>'
-                     + '<td>'+ escapeHtml(c.room || '') +'</td>'
-                     + '<td>'+ escapeHtml(c.name || '') +'</td>'
-                     + '<td>'+ escapeHtml(c.ip || '') +'</td>'
-                     + '<td>'+ (s1 ? '<a href="'+escapeHtml(s1)+'" target="_blank" rel="noopener">'+escapeHtml(s1)+'</a>' : '') +'</td>'
-                     + '<td>'+ (s2 ? '<a href="'+escapeHtml(s2)+'" target="_blank" rel="noopener">'+escapeHtml(s2)+'</a>' : '') +'</td>';
+        const key = c.key || '';
+        const keyShort = key ? (key.slice(0,8) + '…' + key.slice(-4)) : '';
+        tr.innerHTML =
+            '<td>' + (i+1) + '</td>'
+          + '<td>' + escapeHtml(c.room || '') + '</td>'
+          + '<td>' + escapeHtml(c.name || '') + '</td>'
+          + '<td>' + escapeHtml(c.ip || '') + '</td>'
+          + '<td>' + (key ? ('<code title="'+escapeHtml(key)+'">'+escapeHtml(keyShort)+'</code>') : '—') + '</td>';
         tableBody.appendChild(tr);
       });
       if (typeof j.count === 'number') document.title = 'Chat Admin ('+ j.count +')';

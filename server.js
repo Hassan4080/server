@@ -2,6 +2,7 @@
 // WebSocket chat relay with rooms, rate-limit, heartbeats, keepalive.
 // Admin views + rolling logs. Key management with Admin/Conn/Logs tokens.
 // Adds "key" to /connections.json rows so you can see which key a client used.
+// Enforces 1 active WebSocket connection per key and kicks on key revocation.
 
 import http from "node:http";
 import { WebSocketServer } from "ws";
@@ -16,60 +17,11 @@ const ADMIN_TOKEN  = process.env.ADMIN_TOKEN || "";
 const CONN_TOKEN   = process.env.CONN_TOKEN  || "";
 const LOGS_TOKEN   = process.env.LOGS_TOKEN  || "";
 const MAX_LOGS     = Number(process.env.MAX_LOGS || 2000);
-const DATABASE_URL = process.env.DATABASE_URL || "";
 
-// -------------------- DB (keys) --------------------
+// -------------------- Key store (JSON file) --------------------
 let KeyStore; // { listKeys, findKey, generateKey, revokeKey }
 
-if (DATABASE_URL) {
-  const { Pool } = await import("pg").then(m => m.default || m);
-  const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS chat_keys (
-      id SERIAL PRIMARY KEY,
-      label TEXT NOT NULL,
-      key_value TEXT UNIQUE NOT NULL,
-      revoked BOOLEAN NOT NULL DEFAULT FALSE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS chat_keys_key_idx ON chat_keys(key_value);
-  `);
-
-  KeyStore = {
-    async listKeys() {
-      const { rows } = await pool.query(
-        `SELECT label, key_value AS key, revoked, created_at AS "createdAt"
-         FROM chat_keys ORDER BY created_at DESC`
-      );
-      return rows;
-    },
-    async findKey(key) {
-      const { rows } = await pool.query(
-        `SELECT label, key_value AS key, revoked, created_at AS "createdAt"
-         FROM chat_keys WHERE key_value = $1 LIMIT 1`, [key]
-      );
-      return rows[0] || null;
-    },
-    async generateKey(label = "") {
-      const key = crypto.randomBytes(16).toString("hex"); // 32 hex
-      const { rows } = await pool.query(
-        `INSERT INTO chat_keys(label, key_value) VALUES($1,$2)
-         RETURNING label, key_value AS key, revoked, created_at AS "createdAt"`,
-        [label, key]
-      );
-      return rows[0];
-    },
-    async revokeKey(key) {
-      const { rowCount } = await pool.query(
-        `UPDATE chat_keys SET revoked = TRUE WHERE key_value = $1`, [key]
-      );
-      return rowCount > 0;
-    }
-  };
-  console.log("[keys] Using PostgreSQL store");
-} else {
-  // JSON file fallback
+  // JSON file store (no database required)
   const KEYS_FILE = path.join(process.cwd(), "data", "keys.json");
   function ensureKeysFile() {
     const dir = path.dirname(KEYS_FILE);
@@ -88,7 +40,7 @@ if (DATABASE_URL) {
     fs.renameSync(tmp, KEYS_FILE);
   }
 
-  KeyStore = {
+KeyStore = {
     async listKeys() { return readKeys(); },
     async findKey(key) { return readKeys().find(k => k.key === key) || null; },
     async generateKey(label = "") {
@@ -105,7 +57,7 @@ if (DATABASE_URL) {
     }
   };
   console.log("[keys] Using file store at ./data/keys.json");
-}
+
 
 // --- skins: nameHash -> [s1, s2] (left in; unused by admin)
 const skinRegistry = new Map();
@@ -165,9 +117,12 @@ const sseClients = new Map(); // key -> Set<ServerResponse>
 function addSseClient(key, res) {
   if (!sseClients.has(key)) sseClients.set(key, new Set());
   const set = sseClients.get(key);
-  // single-session policy: kick previous session for same key
+  // single-session policy on overlay: kick previous session for same key
   for (const r of set) {
-    try { r.write(`event: revoked\ndata: {"reason":"duplicate"}\n\n`); r.end(); } catch {}
+    try {
+      r.write(`event: revoked\ndata: {"reason":"duplicate"}\n\n`);
+      r.end();
+    } catch {}
   }
   set.clear();
   set.add(res);
@@ -178,11 +133,56 @@ function removeSseClient(key, res) {
   set.delete(res);
   if (!set.size) sseClients.delete(key);
 }
+
+// =============== WebSocket key sessions (1 connection per key) ===============
+const keySessions = new Map(); // key -> Set<ws>
+
+function addKeySession(key, ws) {
+  if (!key) return;
+  let set = keySessions.get(key);
+  if (!set) {
+    set = new Set();
+    keySessions.set(key, set);
+  }
+  // enforce 1 active ws per key: close any existing clients
+  for (const client of set) {
+    if (client !== ws && client.readyState === client.OPEN) {
+      try { client.close(4001, "key in use on another session"); } catch {}
+    }
+  }
+  set.add(ws);
+}
+
+function removeKeySession(key, ws) {
+  if (!key) return;
+  const set = keySessions.get(key);
+  if (!set) return;
+  set.delete(ws);
+  if (!set.size) keySessions.delete(key);
+}
+
+function closeKeySessions(key, code = 4002, reason = "key revoked") {
+  const set = keySessions.get(key);
+  if (!set) return;
+  for (const client of set) {
+    if (client.readyState === client.OPEN) {
+      try { client.close(code, reason); } catch {}
+    }
+  }
+  keySessions.delete(key);
+}
+
 function broadcastRevoked(key) {
+  // close any active WebSocket sessions for this key
+  closeKeySessions(key);
+  // and notify overlay SSE listeners so they clear storage + reload
   const set = sseClients.get(key);
   if (!set) return;
   for (const r of set) {
-    try { r.write(`event: revoked\ndata: {}\n\n`); r.end(); } catch {}
+    try {
+      r.write(`event: revoked\ndata: {}\n\n`);
+      r.end();
+    } catch {}
   }
   sseClients.delete(key);
 }
@@ -234,7 +234,6 @@ function requireConn(req, res) {
   return true;
 }
 function requireLogs(req, res) {
-  // simpler & robust (fixes your deploy error)
   const u = new URL(req.url, "http://x");
   const tok = req.headers["x-logs-token"] || u.searchParams.get("token") || "";
   if (!LOGS_TOKEN || tok !== LOGS_TOKEN) {
@@ -398,7 +397,7 @@ const server = http.createServer(async (req, res) => {
       const key = String(body.key || "");
       const ok = await KeyStore.revokeKey(key);
       if (!ok) return sendJSON(res, 404, { error: "not_found" });
-      broadcastRevoked(key); // push to all clients
+      broadcastRevoked(key); // push to all clients + close sockets
       return sendJSON(res, 200, { ok: true });
     } catch {
       return sendJSON(res, 400, { error: "bad_json" });
@@ -436,7 +435,7 @@ setInterval(() => {
   });
 }, SERVER_KEEP_MS);
 
-wss.on("connection", (ws, req) => {
+wss.on("connection", async (ws, req) => {
   ws.skin = ["", ""];
   ws.nameHash = "";
   ws.id = crypto.randomUUID();
@@ -455,18 +454,43 @@ wss.on("connection", (ws, req) => {
   const providedKey   = query.key ? String(query.key) : "";
 
   // If a token query is present, enforce it as LOGS_TOKEN (used by admin monitors).
-  if (providedToken !== null && providedToken !== LOGS_TOKEN) {
+  const isMonitor = providedToken !== null;
+  if (isMonitor && providedToken !== LOGS_TOKEN) {
     try { ws.close(); } catch {}
     return;
   }
 
   const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString();
-  ws.meta = { room, name, ip, key: providedKey }; // include key
+
+  // For normal players (non-monitor), enforce a valid, non-revoked key
+  if (!isMonitor) {
+    if (!providedKey) {
+      console.warn("[ws] missing key, closing");
+      try { ws.close(4003, "missing key"); } catch {}
+      return;
+    }
+    const k = await KeyStore.findKey(providedKey);
+    if (!k || k.revoked) {
+      console.warn("[ws] invalid or revoked key, closing");
+      try { ws.close(4004, "invalid key"); } catch {}
+      return;
+    }
+    // register this ws under the key and enforce 1 active connection
+    addKeySession(providedKey, ws);
+  }
+
+  ws.meta = { room, name, ip, key: providedKey }; // include key (empty for monitors)
 
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
 
-  console.log("[join]", name, "room=", room, "ip=", ip, "key=", providedKey ? providedKey.slice(0,6)+"…" : "");
+  console.log(
+    "[join]",
+    name,
+    "room=", room,
+    "ip=", ip,
+    "key=", providedKey ? providedKey.slice(0, 6) + "…" : "(monitor/no-key)"
+  );
 
   ws.on("message", (raw) => {
     let m;
@@ -514,6 +538,9 @@ wss.on("connection", (ws, req) => {
     if (set) {
       set.delete(ws);
       if (!set.size) rooms.delete(room);
+    }
+    if (!isMonitor && providedKey) {
+      removeKeySession(providedKey, ws);
     }
     console.log("[leave]", ws.meta.name, "room=", room);
   });

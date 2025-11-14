@@ -14,7 +14,13 @@ import path from "node:path";
 const PORT = process.env.PORT || 8080;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";   // for /admin/keys
 const DATABASE_URL = process.env.DATABASE_URL || "";
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://xprivate.vercel.app";
 
+function setCORS(res) {
+  res.setHeader("access-control-allow-origin", FRONTEND_ORIGIN);
+  res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
+  res.setHeader("access-control-allow-headers", "content-type");
+}
 // -------------------- DB (keys) --------------------
 let KeyStore; // { listKeys, findKey, generateKey, revokeKey }
 
@@ -236,6 +242,13 @@ const server = http.createServer((req, res) => {
   const pathname = parsed.pathname || "/";
   const method = req.method || "GET";
 
+  // --- global preflight handler for CORS ---
+  if (req.method === "OPTIONS") {
+    setCORS(res);
+    res.writeHead(204);
+    res.end();
+    return;
+}
   // Health
   if (pathname === "/" || pathname === "/health") {
     res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
@@ -435,43 +448,37 @@ load();
   }
 
   // --- POST /validate (overlay key check) ---
-  if (pathname === "/validate" && method === "POST") {
+  if (pathname === "/validate" && req.method === "POST") {
     let body = "";
-    req.on("data", chunk => {
-      body += chunk;
-      if (body.length > 1e5) req.destroy();
-    });
+    req.on("data", (chunk) => { body += chunk; });
     req.on("end", async () => {
+      setCORS(res);
+
       let key = "";
       try {
         const j = JSON.parse(body || "{}");
         key = String(j.key || "").trim();
-      } catch {}
-
-      if (!key) {
-        res.writeHead(400, {
-          "content-type": "application/json; charset=utf-8",
-          "access-control-allow-origin": "*"
-        });
-        res.end(JSON.stringify({ ok: false, reason: "missing key" }));
+      } catch {
+        res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, reason: "invalid JSON" }));
         return;
       }
-
-      const item = await KeyStore.findKey(key);
-      if (!item || item.revoked) {
-        res.writeHead(403, {
-          "content-type": "application/json; charset=utf-8",
-          "access-control-allow-origin": "*"
-        });
-        res.end(JSON.stringify({ ok: false, reason: "invalid or revoked" }));
+  
+      if (!KeyStore) {
+        res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, reason: "Key store not ready" }));
         return;
       }
-
-      res.writeHead(200, {
-        "content-type": "application/json; charset=utf-8",
-        "access-control-allow-origin": "*"
-      });
-      res.end(JSON.stringify({ ok: true, key: item.key }));
+  
+      const rec = await KeyStore.findKey(key);
+      if (!rec || rec.revoked) {
+        res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, reason: "invalid or revoked key" }));
+        return;
+      }
+  
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, key: rec.key, label: rec.label || "" }));
     });
     return;
   }

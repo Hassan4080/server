@@ -14,12 +14,31 @@ import path from "node:path";
 const PORT = process.env.PORT || 8080;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";   // for /admin/keys
 const DATABASE_URL = process.env.DATABASE_URL || "";
+
+// Optional: keep or delete if no longer used
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://xprivate.vercel.app";
 
-function setCORS(res) {
-  res.setHeader("access-control-allow-origin", FRONTEND_ORIGIN);
-  res.setHeader("access-control-allow-methods", "GET,POST,OPTIONS");
-  res.setHeader("access-control-allow-headers", "content-type");
+// ---- Origin allowlist ----
+const ORIGIN_WHITELIST = [
+  "https://xprivate.vercel.app",
+  "https://delt.io",
+];
+
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  return ORIGIN_WHITELIST.includes(origin.trim());
+}
+
+// ---- CORS helper ----
+function setCORS(req, res) {
+  const origin = req.headers.origin;
+
+  if (isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin); // reflect allowed origin
+    res.setHeader("Vary", "Origin");                      // avoid caching issues
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "content-type, x-admin-token");
 }
 // -------------------- DB (keys) --------------------
 let KeyStore; // { listKeys, findKey, generateKey, revokeKey }
@@ -238,13 +257,13 @@ function notifyRevocation(key) {
 
 // =================== HTTP SERVER ===================
 const server = http.createServer((req, res) => {
+  setCORS(req, res);
   const parsed = url.parse(req.url, true);
   const pathname = parsed.pathname || "/";
   const method = req.method || "GET";
 
   // --- global preflight handler for CORS ---
   if (req.method === "OPTIONS") {
-    setCORS(res);
     res.writeHead(204);
     res.end();
     return;
@@ -552,6 +571,11 @@ setInterval(() => {
 const skinRegistry = new Map();
 
 wss.on("connection", async (ws, req) => {
+  const origin = req.headers.origin || "";
+  if (!isAllowedOrigin(origin)) {
+    try { ws.close(); } catch {}
+    return;
+  }
   ws.skin = ["", ""];
   ws.nameHash = "";
   ws.id = crypto.randomUUID();

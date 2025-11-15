@@ -1,6 +1,6 @@
 // server.js
 // WebSocket chat relay with rooms, rate-limit, heartbeats, keepalive,
-// admin views, key management (DB-backed), one-connection-per-key,
+// admin views, key management (DB-backed), per-key-per-IP limit,
 // and revocation kicks via SSE + WS close.
 
 import http from "node:http";
@@ -40,7 +40,8 @@ function setCORS(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "content-type, x-admin-token");
 }
-// -------------------- DB (keys) --------------------
+
+// =================== DB (keys) ===================
 let KeyStore; // { listKeys, findKey, generateKey, revokeKey }
 
 if (DATABASE_URL) {
@@ -186,36 +187,44 @@ function normalizeSkins(v) {
   return [String(a), String(b)];
 }
 
-// key -> Set<ws>  (for one-connection-per-key + revocation kick)
-const keyToSockets = new Map();
+// key -> (ip -> Set<ws>) for per-key-per-IP limit + revocation kicks
+const keySessions = new Map();
+const MAX_PER_KEY_PER_IP = 4;
 
 // SSE revocation subscribers: key -> Set<res>
 const sseClientsByKey = new Map();
 
-function registerKeySocket(key, ws) {
-  let set = keyToSockets.get(key);
+function registerKeySocket(key, ip, ws) {
+  let ipMap = keySessions.get(key);
+  if (!ipMap) {
+    ipMap = new Map(); // ip -> Set<ws>
+    keySessions.set(key, ipMap);
+  }
+  let set = ipMap.get(ip);
   if (!set) {
     set = new Set();
-    keyToSockets.set(key, set);
+    ipMap.set(ip, set);
   }
-  // kick any existing sockets for this key
-  if (set.size) {
-    for (const other of set) {
-      if (other !== ws && other.readyState === other.OPEN) {
-        try { other.close(4001, "Key in use on another tab"); } catch {}
-      }
-    }
-    set.clear();
+  if (set.size >= MAX_PER_KEY_PER_IP) {
+    return false;
   }
   set.add(ws);
+  return true;
 }
 
-function unregisterKeySocket(key, ws) {
+function unregisterKeySocket(key, ip, ws) {
   if (!key) return;
-  const set = keyToSockets.get(key);
+  const ipMap = keySessions.get(key);
+  if (!ipMap) return;
+  const set = ipMap.get(ip);
   if (!set) return;
   set.delete(ws);
-  if (!set.size) keyToSockets.delete(key);
+  if (!set.size) {
+    ipMap.delete(ip);
+  }
+  if (!ipMap.size) {
+    keySessions.delete(key);
+  }
 }
 
 function broadcast(room, payload, except) {
@@ -235,12 +244,14 @@ function broadcast(room, payload, except) {
 // Kick all sockets + notify SSE clients on revocation
 function notifyRevocation(key) {
   // Close all WebSocket connections using this key
-  const set = keyToSockets.get(key);
-  if (set) {
-    for (const ws of set) {
-      try { ws.close(4001, "Key revoked"); } catch {}
+  const ipMap = keySessions.get(key);
+  if (ipMap) {
+    for (const set of ipMap.values()) {
+      for (const ws of set) {
+        try { ws.close(4001, "Key revoked"); } catch {}
+      }
     }
-    keyToSockets.delete(key);
+    keySessions.delete(key);
   }
 
   // Notify SSE subscribers
@@ -267,7 +278,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(204);
     res.end();
     return;
-}
+  }
+
   // Health
   if (pathname === "/" || pathname === "/health") {
     res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
@@ -482,20 +494,20 @@ load();
         res.end(JSON.stringify({ ok: false, reason: "invalid JSON" }));
         return;
       }
-  
+
       if (!KeyStore) {
         res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, reason: "Key store not ready" }));
         return;
       }
-  
+
       const rec = await KeyStore.findKey(key);
       if (!rec || rec.revoked) {
         res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, reason: "invalid or revoked key" }));
         return;
       }
-  
+
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, key: rec.key, label: rec.label || "" }));
     });
@@ -576,6 +588,7 @@ wss.on("connection", async (ws, req) => {
     try { ws.close(); } catch {}
     return;
   }
+
   ws.skin = ["", ""];
   ws.nameHash = "";
   ws.id = crypto.randomUUID();
@@ -587,36 +600,41 @@ wss.on("connection", async (ws, req) => {
   const name = String(query.name || "anon").slice(0, 24);
   const providedKey = query.key ? String(query.key).trim() : "";
 
-  const ip = (
+  const rawIp = (
     req.headers["x-forwarded-for"] ||
     req.socket.remoteAddress ||
     ""
   ).toString();
+  const clientIp = rawIp.split(",")[0].trim() || rawIp;
 
   // require key
   if (!providedKey) {
-    console.log("[reject][no-key]", ip);
+    console.log("[reject][no-key]", clientIp);
     try { ws.close(1008, "Key required"); } catch {}
     return;
   }
 
   const keyInfo = await KeyStore.findKey(providedKey);
   if (!keyInfo || keyInfo.revoked) {
-    console.log("[reject][bad-key]", providedKey.slice(0, 8) + "...", ip);
+    console.log("[reject][bad-key]", providedKey.slice(0, 8) + "...", clientIp);
     try { ws.close(1008, "Invalid or revoked key"); } catch {}
     return;
   }
 
-  ws.meta = { room, name, ip, key: providedKey };
+  ws.meta = { room, name, ip: rawIp, key: providedKey };
 
-  // enforce 1 connection per key
-  registerKeySocket(providedKey, ws);
+  // per-key-per-IP limit
+  if (!registerKeySocket(providedKey, clientIp, ws)) {
+    console.log("[limit]", "too many sessions for key", providedKey.slice(0, 8) + "...", "ip=", clientIp);
+    try { ws.close(1008, "Too many sessions for this key/IP"); } catch {}
+    return;
+  }
 
   // join room
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
 
-  console.log("[join]", name, "room=", room, "ip=", ip, "key=", providedKey.slice(0, 8) + "...");
+  console.log("[join]", name, "room=", room, "ip=", rawIp, "key=", providedKey.slice(0, 8) + "...");
 
   // send bulk skins
   if (skinRegistry.size) {
@@ -640,7 +658,7 @@ wss.on("connection", async (ws, req) => {
     }
 
     if (m.type === "say") {
-      if (!allowed(ip)) return;
+      if (!allowed(clientIp)) return;
       const text = String(m.text || "").slice(0, 400);
       if (!text.trim()) return;
       const msg = {
@@ -680,7 +698,7 @@ wss.on("connection", async (ws, req) => {
       set.delete(ws);
       if (!set.size) rooms.delete(room);
     }
-    unregisterKeySocket(providedKey, ws);
+    unregisterKeySocket(providedKey, clientIp, ws);
     console.log("[leave]", ws.meta.name, "room=", room, "key=", providedKey.slice(0, 8) + "...");
   });
 });

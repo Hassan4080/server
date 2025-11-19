@@ -34,7 +34,7 @@ function setCORS(req, res) {
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "content-type,x-admin-token");
+  res.setHeader("Access-Control-Allow-Headers", "content-type,x-admin-token,x-conn-token,x-logs-token");
 }
 
 // =============================================================
@@ -65,10 +65,11 @@ if (DATABASE_URL) {
   KeyStore = {
     async listKeys() {
       const { rows } = await pool.query(`
-        SELECT label,
-               key_value AS key,
-               revoked,
-               created_at AS "createdAt"
+        SELECT
+          label,
+          key_value AS key,
+          revoked,
+          created_at AS "createdAt"
         FROM chat_keys
         ORDER BY created_at DESC
       `);
@@ -76,43 +77,53 @@ if (DATABASE_URL) {
     },
 
     async findKey(key) {
-      const { rows } = await pool.query(`
-        SELECT label,
-               key_value AS key,
-               revoked,
-               created_at AS "createdAt"
+      const { rows } = await pool.query(
+        `
+        SELECT
+          label,
+          key_value AS key,
+          revoked,
+          created_at AS "createdAt"
         FROM chat_keys
         WHERE key_value = $1
         LIMIT 1
-      `, [key]);
+        `,
+        [key]
+      );
       return rows[0] || null;
     },
 
     async generateKey(label = "") {
       const key = crypto.randomBytes(16).toString("hex");
-      const { rows } = await pool.query(`
+      const { rows } = await pool.query(
+        `
         INSERT INTO chat_keys(label, key_value)
-        VALUES($1, $2)
-        RETURNING label,
-                  key_value AS key,
-                  revoked,
-                  created_at AS "createdAt"
-      `, [label, key]);
+        VALUES ($1, $2)
+        RETURNING
+          label,
+          key_value AS key,
+          revoked,
+          created_at AS "createdAt"
+        `,
+        [label, key]
+      );
       return rows[0];
     },
 
     async revokeKey(key) {
-      const { rowCount } = await pool.query(`
+      const { rowCount } = await pool.query(
+        `
         UPDATE chat_keys
         SET revoked = TRUE
         WHERE key_value = $1
-      `, [key]);
+        `,
+        [key]
+      );
       return rowCount > 0;
     }
   };
 
   console.log("[keys] Using PostgreSQL store");
-
 } else {
   // ---- JSON file mode ----
   const KEYS_FILE = path.join(process.cwd(), "data", "keys.json");
@@ -138,7 +149,9 @@ if (DATABASE_URL) {
   }
 
   KeyStore = {
-    async listKeys() { return readKeys(); },
+    async listKeys() {
+      return readKeys();
+    },
 
     async findKey(key) {
       return readKeys().find(k => k.key === key) || null;
@@ -174,11 +187,10 @@ if (DATABASE_URL) {
 // =============================================================
 //                     ROOMS / LOGS / SKINS
 // =============================================================
-const rooms = new Map();      // room → Set<ws>
-const roomLogs = new Map();   // room → messages
+const rooms = new Map();      // room -> Set<ws>
+const roomLogs = new Map();   // room -> string[]
 const skinRegistry = new Map();
 
-// add to room logs
 function logRoom(room, line) {
   let arr = roomLogs.get(room);
   if (!arr) {
@@ -186,16 +198,15 @@ function logRoom(room, line) {
     roomLogs.set(room, arr);
   }
   arr.push(`[${new Date().toISOString()}] ${line}`);
-  if (arr.length > 200)
-    arr.splice(0, arr.length - 200);
+  if (arr.length > 200) arr.splice(0, arr.length - 200);
 }
 
 // =============================================================
 //                 KEY SESSIONS (IP tracking)
 // =============================================================
-const keySessions = new Map();     // key -> (ip -> Set<ws>)
+const keySessions = new Map(); // key -> (ip -> Set<ws>)
 const MAX_PER_KEY_PER_IP = 4;
-const MAX_IPS_PER_KEY = 2;         // main + bot allowed, 3rd IP = revoke
+const MAX_IPS_PER_KEY = 2;     // main + bot allowed; 3rd IP => revoke
 
 function registerKeySocket(key, ip, ws) {
   let ipMap = keySessions.get(key);
@@ -208,9 +219,7 @@ function registerKeySocket(key, ip, ws) {
     set = new Set();
     ipMap.set(ip, set);
   }
-  if (set.size >= MAX_PER_KEY_PER_IP) {
-    return false;
-  }
+  if (set.size >= MAX_PER_KEY_PER_IP) return false;
   set.add(ws);
   return true;
 }
@@ -229,10 +238,10 @@ function unregisterKeySocket(key, ip, ws) {
 // =============================================================
 //                  SSE CLIENTS (revocation)
 // =============================================================
-const sseClientsByKey = new Map();
+const sseClientsByKey = new Map(); // key -> Set<res>
 
 function notifyRevocation(key) {
-  // close WS sockets
+  // Close WebSockets
   const ipMap = keySessions.get(key);
   if (ipMap) {
     for (const set of ipMap.values()) {
@@ -243,7 +252,7 @@ function notifyRevocation(key) {
     keySessions.delete(key);
   }
 
-  // send SSE revoked
+  // Notify SSE clients
   const subs = sseClientsByKey.get(key);
   if (subs) {
     const msg = `event: revoked\ndata: ${JSON.stringify({ key })}\n\n`;
@@ -259,7 +268,7 @@ function notifyRevocation(key) {
 // =============================================================
 const RATE_WINDOW = 5000;
 const RATE_LIMIT = 12;
-const rateMap = new Map();
+const rateMap = new Map(); // ip -> timestamps[]
 
 function canSend(ip) {
   const now = Date.now();
@@ -291,24 +300,24 @@ const server = http.createServer((req, res) => {
 
   // health
   if (pathname === "/" || pathname === "/health") {
-    res.writeHead(200, {"content-type": "text/plain"});
+    res.writeHead(200, { "content-type": "text/plain" });
     res.end("ok");
     return;
   }
 
   // logs.json
   if (pathname === "/logs.json" && method === "GET") {
-    const room = String(parsed.query.room || "").slice(0,128);
+    const room = String(parsed.query.room || "").slice(0, 128);
     const msgs = room ? roomLogs.get(room) || [] : [];
-    res.writeHead(200, {"content-type":"application/json"});
+    res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true, room, messages: msgs }));
     return;
   }
 
-  // logs/clear
+  // logs/clear (global)
   if (pathname === "/logs/clear" && method === "POST") {
     roomLogs.clear();
-    res.writeHead(200, {"content-type":"application/json"});
+    res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
     return;
   }
@@ -324,27 +333,35 @@ const server = http.createServer((req, res) => {
           room,
           name: meta.name || "",
           ip: meta.ip || "",
-          key: meta.key ? meta.key.slice(0,8)+"…" : "",
-          skins: meta.skin || ["",""]
+          key: meta.key ? meta.key.slice(0, 8) + "…" : "",
+          skins: meta.skin || ["", ""]
         });
       }
     }
 
-    res.writeHead(200, {"content-type":"application/json"});
+    res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true, connections: snapshot }));
     return;
   }
 
-  // serve admin.html
+  // rooms.json  (used by admin.html to discover rooms)
+  if (pathname === "/rooms.json" && method === "GET") {
+    const list = Array.from(rooms.keys());
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, rooms: list }));
+    return;
+  }
+
+  // admin.html
   if ((pathname === "/admin" || pathname === "/admin.html") && method === "GET") {
     const file = path.join(process.cwd(), "admin.html");
     fs.readFile(file, "utf8", (err, data) => {
       if (err) {
-        res.writeHead(500, {"content-type":"text/plain"});
+        res.writeHead(500, { "content-type": "text/plain" });
         res.end("admin.html not found");
         return;
       }
-      res.writeHead(200, {"content-type":"text/html"});
+      res.writeHead(200, { "content-type": "text/html" });
       res.end(data);
     });
     return;
@@ -355,9 +372,8 @@ const server = http.createServer((req, res) => {
   // ============================
   if (pathname === "/admin/keys") {
     const adminTok = req.headers["x-admin-token"] || "";
-
     if (!ADMIN_TOKEN || adminTok !== ADMIN_TOKEN) {
-      res.writeHead(401, {"content-type":"application/json"});
+      res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
       return;
     }
@@ -365,36 +381,36 @@ const server = http.createServer((req, res) => {
     // GET — list keys
     if (method === "GET") {
       KeyStore.listKeys()
-        .then((keys) => {
-          res.writeHead(200, {"content-type":"application/json"});
+        .then(keys => {
+          res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: true, keys }));
         })
-        .catch((err) => {
+        .catch(err => {
           console.error("[admin/keys][GET]", err);
-          res.writeHead(500, {"content-type":"application/json"});
+          res.writeHead(500, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "internal error" }));
         });
       return;
     }
 
-    // POST / DELETE read body
+    // POST / DELETE — need body
     let body = "";
-    req.on("data", chunk => body += chunk);
+    req.on("data", chunk => { body += chunk; });
     req.on("end", () => {
       let json = {};
       try { json = JSON.parse(body || "{}"); } catch {}
 
       // POST — generate key
       if (method === "POST") {
-        const label = String(json.label || "").slice(0,128);
+        const label = String(json.label || "").slice(0, 128);
         KeyStore.generateKey(label)
-          .then((rec) => {
-            res.writeHead(200, {"content-type":"application/json"});
+          .then(rec => {
+            res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: true, key: rec }));
           })
-          .catch((err) => {
+          .catch(err => {
             console.error("[admin/keys][POST]", err);
-            res.writeHead(500, {"content-type":"application/json"});
+            res.writeHead(500, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: "internal error" }));
           });
         return;
@@ -404,27 +420,27 @@ const server = http.createServer((req, res) => {
       if (method === "DELETE") {
         const key = String(json.key || "").trim();
         if (!key) {
-          res.writeHead(400, {"content-type":"application/json"});
-          res.end(JSON.stringify({ ok:false, error:"missing key" }));
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "missing key" }));
           return;
         }
 
         KeyStore.revokeKey(key)
-          .then((changed) => {
+          .then(changed => {
             if (changed) notifyRevocation(key);
-            res.writeHead(200, {"content-type":"application/json"});
+            res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: changed }));
           })
-          .catch((err) => {
+          .catch(err => {
             console.error("[admin/keys][DELETE]", err);
-            res.writeHead(500, {"content-type":"application/json"});
+            res.writeHead(500, { "content-type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: "internal error" }));
           });
         return;
       }
 
       // other methods
-      res.writeHead(405, {"content-type":"application/json"});
+      res.writeHead(405, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "method not allowed" }));
     });
 
@@ -434,7 +450,7 @@ const server = http.createServer((req, res) => {
   // POST /validate
   if (pathname === "/validate" && method === "POST") {
     let body = "";
-    req.on("data", chunk => body += chunk);
+    req.on("data", chunk => { body += chunk; });
     req.on("end", async () => {
       let json = {};
       try { json = JSON.parse(body || "{}"); } catch {}
@@ -442,52 +458,52 @@ const server = http.createServer((req, res) => {
 
       const rec = await KeyStore.findKey(key);
       if (!rec || rec.revoked) {
-        res.writeHead(403, {"content-type":"application/json"});
-        res.end(JSON.stringify({ ok:false, error:"invalid or revoked key" }));
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "invalid or revoked key" }));
         return;
       }
 
-      res.writeHead(200, {"content-type":"application/json"});
-      res.end(JSON.stringify({ ok:true, label: rec.label || "" }));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, label: rec.label || "" }));
     });
     return;
   }
 
-  // SSE: revocation stream
+  // SSE: revocations/stream
   if (pathname === "/revocations/stream") {
     const key = String(parsed.query.key || "").trim();
     if (!key) {
-      res.writeHead(400, {"content-type":"text/plain"});
+      res.writeHead(400, { "content-type": "text/plain" });
       res.end("missing key");
       return;
     }
 
     res.writeHead(200, {
-      "content-type":"text/event-stream; charset=utf-8",
-      "cache-control":"no-cache",
-      "connection":"keep-alive"
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      "connection": "keep-alive"
     });
     res.write(":ok\n\n");
 
-    let s = sseClientsByKey.get(key);
-    if (!s) {
-      s = new Set();
-      sseClientsByKey.set(key, s);
+    let set = sseClientsByKey.get(key);
+    if (!set) {
+      set = new Set();
+      sseClientsByKey.set(key, set);
     }
-    s.add(res);
+    set.add(res);
 
     req.on("close", () => {
-      const set = sseClientsByKey.get(key);
-      if (!set) return;
-      set.delete(res);
-      if (set.size === 0) sseClientsByKey.delete(key);
+      const s = sseClientsByKey.get(key);
+      if (!s) return;
+      s.delete(res);
+      if (s.size === 0) sseClientsByKey.delete(key);
     });
 
     return;
   }
 
   // 404
-  res.writeHead(404, {"content-type":"text/plain"});
+  res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
 });
 
@@ -496,7 +512,6 @@ const server = http.createServer((req, res) => {
 // =============================================================
 const wss = new WebSocketServer({ server, path: "/chat" });
 
-// heartbeat
 function heartbeat() { this.isAlive = true; }
 
 setInterval(() => {
@@ -510,7 +525,7 @@ setInterval(() => {
   });
 }, 30000);
 
-// keepalive data frame
+// keepalive data frame (helps some proxies)
 setInterval(() => {
   wss.clients.forEach(ws => {
     if (ws.readyState === ws.OPEN) {
@@ -529,12 +544,12 @@ wss.on("connection", async (ws, req) => {
   ws.isAlive = true;
   ws.on("pong", heartbeat);
 
-  ws.skin = ["",""];
+  ws.skin = ["", ""];
   ws.nameHash = "";
 
   const { query } = url.parse(req.url, true);
-  const room = String(query.room || "global").slice(0,64);
-  const name = String(query.name || "anon").slice(0,24);
+  const room = String(query.room || "global").slice(0, 64);
+  const initialName = String(query.name || "Anon").slice(0, 24);
   const providedKey = String(query.key || "").trim();
 
   const rawIp = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString();
@@ -551,11 +566,15 @@ wss.on("connection", async (ws, req) => {
     return;
   }
 
-  ws.meta = { room, name, ip: rawIp, key: providedKey };
+  ws.meta = {
+    room,
+    name: initialName,
+    ip: rawIp,
+    key: providedKey,
+    skin: ws.skin
+  };
 
-  // =====================
-  //      MULTI-IP RULE
-  // =====================
+  // MULTI-IP RULE
   const existing = keySessions.get(providedKey);
   if (existing) {
     const ips = new Set(existing.keys());
@@ -573,16 +592,19 @@ wss.on("connection", async (ws, req) => {
     return;
   }
 
-  // join room
+  // join room registry
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
 
-  // send skin bulk
+  // send skin registry in bulk
   if (skinRegistry.size) {
-    const bulk = [...skinRegistry.entries()].map(([h,[a,b]]) => [h,a,b]);
-    try { ws.send(JSON.stringify({ t:"skin", op:"bulk", data: bulk })); } catch {}
+    const bulk = [...skinRegistry.entries()].map(([h, [a, b]]) => [h, a, b]);
+    try {
+      ws.send(JSON.stringify({ t: "skin", op: "bulk", data: bulk }));
+    } catch {}
   }
 
+  // ------------- MESSAGE HANDLER -------------
   ws.on("message", data => {
     let msg;
     try { msg = JSON.parse(data.toString()); }
@@ -590,30 +612,43 @@ wss.on("connection", async (ws, req) => {
 
     if (msg.type === "ping" || msg.type === "pong") return;
 
+    // skin update from client
     if (msg.type === "skin") {
-      const s1 = String(msg.s1 || "").slice(0,64);
-      const s2 = String(msg.s2 || "").slice(0,64);
+      const s1 = String(msg.s1 || "").slice(0, 64);
+      const s2 = String(msg.s2 || "").slice(0, 64);
       ws.skin = [s1, s2];
-      const hash = String(msg.hash || "").slice(0,64);
+      ws.meta.skin = ws.skin;
+      const hash = String(msg.hash || "").slice(0, 64);
       ws.nameHash = hash;
       if (hash) skinRegistry.set(hash, [s1, s2]);
       return;
     }
 
-    if (msg.type === "msg") {
-      const text = String(msg.text || "").slice(0,400);
+    // rename support ("rename" from chat.js)
+    if (msg.type === "rename") {
+      const newName = String(msg.name || "").slice(0, 24) || "Anon";
+      ws.meta = ws.meta || {};
+      ws.meta.name = newName;
+      return;
+    }
+
+    // chat messages: both legacy "say" and "msg"
+    if (msg.type === "say" || msg.type === "msg") {
+      const text = String(msg.text || "").slice(0, 400);
       if (!text.trim()) return;
       if (!canSend(clientIp)) return;
+
+      const senderName = (ws.meta && ws.meta.name) || initialName;
 
       const payload = {
         type: "msg",
         room,
-        from: name,
+        from: senderName,
         text,
-        t: Date.now(),
+        ts: Date.now(),
         skins: ws.skin
       };
-      logRoom(room, `CHAT ${name}: ${text}`);
+      logRoom(room, `CHAT ${senderName}: ${text}`);
 
       const set = rooms.get(room) || new Set();
       const line = JSON.stringify(payload);

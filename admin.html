@@ -4,11 +4,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{--bg:#0b0b0b;--fg:#f2f2f2;--mut:#9aa0a6;--card:#151515;--br:#2a2a2a;--acc:#4da3ff}
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
   header{padding:14px 18px;border-bottom:1px solid var(--br);display:grid;gap:10px}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   input,button{padding:8px 10px;border:1px solid var(--br);border-radius:8px;background:#111;color:#fff}
-  button{cursor:pointer} button:hover{border-color:#3a3a3a}
+  button{cursor:pointer}
+  button:hover{border-color:#3a3a3a}
   main{padding:18px;display:grid;gap:18px;grid-template-columns:1.2fr 1fr 1fr}
   @media (max-width:1200px){main{grid-template-columns:1fr}}
   .card{background:var(--card);border:1px solid var(--br);border-radius:12px;overflow:hidden}
@@ -17,20 +19,39 @@
   th,td{border-top:1px solid var(--br);padding:8px 10px;vertical-align:top}
   th{background:#121212;text-align:left;position:sticky;top:0}
   .mut{color:var(--mut)}
-  .rooms{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px;padding:12px}
+  .rooms{
+    display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(360px,1fr));
+    gap:14px;
+    padding:12px;
+    max-height:60vh;
+    overflow:auto;
+  }
   .room{border:1px solid var(--br);border-radius:10px;background:#101010;display:flex;flex-direction:column;min-height:240px}
   .room-h{padding:8px 10px;background:#121212;border-bottom:1px solid var(--br);display:flex;gap:8px;align-items:center}
   .badge{padding:2px 8px;border-radius:999px;background:#1d2633;color:#bcd7ff;font-size:12px;margin-left:6px}
-  .log{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;background:#0b0b0b;color:#e9e9e9;padding:8px 10px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+  .log{
+    font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;
+    background:#0b0b0b;
+    color:#e9e9e9;
+    padding:8px 10px;
+    overflow:auto;
+    white-space:pre-wrap;
+    word-break:break-word;
+    max-height:220px; /* scroll inside each room */
+  }
 </style>
 
 <header>
   <div class="row">
-    <b>Server:</b><input id="base" placeholder="https://chat-smge.onrender.com" style="min-width:360px">
-    <b>CONN_TOKEN:</b><input id="connTok" placeholder="for /connections.json, /rooms.json">
-    <b>LOGS_TOKEN:</b><input id="logsTok" placeholder="for logs + WS monitor">
+    <b>Server:</b>
+    <input id="base" placeholder="https://chat-smge.onrender.com" style="min-width:360px">
+    <b>CONN_TOKEN:</b>
+    <input id="connTok" type="password" placeholder="for /connections.json, /rooms.json">
+    <b>LOGS_TOKEN:</b>
+    <input id="logsTok" type="password" placeholder="for logs + WS monitor">
     <button id="apply">Apply</button>
-    <span class="mut">Poll 2s; logs backfill once, then live-stream.</span>
+    <span class="mut">Poll 2s; connections + logs refreshed by polling.</span>
   </div>
   <div class="row">
     <label>Filter room: <input id="roomFilter" placeholder="(blank = all)"></label>
@@ -63,7 +84,8 @@
     <h2>Keys</h2>
     <div style="padding:12px;display:grid;gap:10px">
       <div class="row">
-        <b>ADMIN_TOKEN:</b><input id="admTok" placeholder="paste once (saved locally)" style="min-width:260px">
+        <b>ADMIN_TOKEN:</b>
+        <input id="admTok" type="password" placeholder="paste once (saved locally)" style="min-width:260px">
         <button id="saveAdmin">Save</button>
         <span class="mut">Needed for /admin/keys.</span>
       </div>
@@ -124,10 +146,13 @@ localStorage.setItem('admin_base', base.value);
 base.addEventListener('change', ()=> localStorage.setItem('admin_base', base.value));
 connEl.addEventListener('change', ()=> localStorage.setItem('admin_conn', connEl.value));
 logsEl.addEventListener('change', ()=> localStorage.setItem('admin_logs', logsEl.value));
-saveAdmin.onclick = ()=> { localStorage.setItem('admin_token', admTok.value); keyMsg.textContent='Admin token saved ✔'; setTimeout(()=>keyMsg.textContent='',1200); };
+saveAdmin.onclick = ()=>{
+  localStorage.setItem('admin_token', admTok.value);
+  keyMsg.textContent='Admin token saved ✔';
+  setTimeout(()=>keyMsg.textContent='',1200);
+};
 
 /* ---------- connections + rooms ---------- */
-const sockets  = new Map();
 const buffers  = new Map();
 const hydrated = new Map();
 const paused   = new Map();
@@ -143,16 +168,25 @@ function card(room){
       <span style="margin-left:auto"></span>
       <button data-pause="${room}">Pause</button>
       <button data-clear="${room}">Clear</button>
-      <button data-reco="${room}">Reconnect</button>
+      <button data-reco="${room}">Refresh</button>
       <button data-pull="${room}">Pull history</button>
       <button data-wipe="${room}">Wipe server logs</button>
     </div>
     <div class="log" data-log="${room}"></div>`;
   rooms.appendChild(c);
-  c.querySelector(`[data-pause="${CSS.escape(room)}"]`).onclick = ()=> paused.set(room, !paused.get(room));
-  c.querySelector(`[data-clear="${CSS.escape(room)}"]`).onclick = ()=>{ buffers.set(room, []); paint(room); };
-  c.querySelector(`[data-reco="${CSS.escape(room)}"]`).onclick = ()=> reconnect(room);
-  c.querySelector(`[data-pull="${CSS.escape(room)}"]`).onclick = ()=> hydrate(room, true);
+  c.querySelector(`[data-pause="${CSS.escape(room)}"]`).onclick = ()=>{
+    const val = !paused.get(room);
+    paused.set(room, val);
+  };
+  c.querySelector(`[data-clear="${CSS.escape(room)}"]`).onclick = ()=>{
+    buffers.set(room, []); paint(room);
+  };
+  c.querySelector(`[data-reco="${CSS.escape(room)}"]`).onclick = ()=>{
+    hydrate(room, true);
+  };
+  c.querySelector(`[data-pull="${CSS.escape(room)}"]`).onclick = ()=>{
+    hydrate(room, true);
+  };
   c.querySelector(`[data-wipe="${CSS.escape(room)}"]`).onclick = async ()=>{
     await fetch(httpBase()+'/logs/clear?room='+encodeURIComponent(room), {
       headers:{'x-logs-token': logsEl.value}, cache:'no-store'
@@ -161,20 +195,24 @@ function card(room){
   };
   return c;
 }
+
 function push(room, m){
   if (!buffers.has(room)) buffers.set(room,[]);
   const a = buffers.get(room);
   a.push(m); if (a.length>MAX) a.splice(0,a.length-MAX);
   if (!paused.get(room)) paint(room);
 }
+
 function paint(room){
   const log = document.querySelector(`[data-log="${CSS.escape(room)}"]`);
   const b   = document.querySelector(`[data-b="${CSS.escape(room)}"]`);
   const arr = buffers.get(room) || [];
-  b.textContent = String(arr.length);
+  if (b) b.textContent = String(arr.length);
+  if (!log) return;
   log.innerHTML = arr.map(x=>`<div>[${new Date(x.ts).toTimeString().slice(0,8)}] <b>${(x.from||'•')}</b> ${x.text||''}</div>`).join('');
   log.scrollTop = log.scrollHeight;
 }
+
 async function hydrate(room, force=false){
   if (hydrated.get(room) && !force) return;
   try{
@@ -182,81 +220,108 @@ async function hydrate(room, force=false){
       headers:{'x-logs-token': logsEl.value}, cache:'no-store'
     });
     const j = await r.json();
-    buffers.set(room, (j.messages||[]).slice(-MAX));
+    const msgs = (j.messages || []).map(line => {
+      // if server stores plain strings, wrap them; if structured, keep
+      if (typeof line === 'string') {
+        return { ts: Date.now(), from: 'log', text: line };
+      }
+      return line;
+    });
+    buffers.set(room, msgs.slice(-MAX));
     hydrated.set(room,true);
     paint(room);
-  }catch{}
+  }catch(e){
+    // silent
+  }
 }
-function connect(room){
-  if (sockets.has(room)) return;
-  hydrate(room);
-  const u = new URL(httpToWs(httpBase()));
-  u.searchParams.set('room', room);
-  u.searchParams.set('name','Monitor');
-  u.searchParams.set('token', logsEl.value);
-  const ws = new WebSocket(u.toString());
-  sockets.set(room, ws);
-  card(room);
-  ws.onopen    = ()=> push(room, {ts:Date.now(), from:'•', text:'[monitor] connected'});
-  ws.onclose   = ()=> { push(room,{ts:Date.now(), from:'•', text:'[monitor] disconnected'}); sockets.delete(room); };
-  ws.onerror   = ()=> push(room, {ts:Date.now(), from:'•', text:'[monitor] error'});
-  ws.onmessage = (ev)=>{
-    try{
-      const d = JSON.parse(ev.data);
-      if (d.type==='msg') push(room, {ts: d.ts||Date.now(), from:d.from||'??', text:d.text||''});
-    }catch{ push(room,{ts:Date.now(), from:'•', text:String(ev.data||'')}); }
-  };
-}
-function reconnect(room){ try{ sockets.get(room)?.close(); }catch{} sockets.delete(room); connect(room); }
 
+function connect(room){
+  card(room);
+  hydrate(room, true);
+}
+
+/* ---------- polling ---------- */
 async function tick(){
+  const roomFilter = filt.value.trim();
+
   // connections table
-  const room = filt.value.trim();
-  const qs = room ? ('?room='+encodeURIComponent(room)) : '';
   try{
+    const qs = roomFilter ? ('?room='+encodeURIComponent(roomFilter)) : '';
     const r = await fetch(httpBase()+'/connections.json'+qs, {
       headers:{'x-conn-token': connEl.value}, cache:'no-store'
     });
     const j = await r.json();
+    const list = (j.clients || j.connections || []);
     tbody.innerHTML='';
-    (j.clients||[]).forEach((c,i)=>{
+    list.forEach((c,i)=>{
       const tr = document.createElement('tr');
       tr.innerHTML =
         `<td>${i+1}</td><td>${c.room||''}</td><td>${c.name||''}</td><td>${c.ip||''}</td><td>${c.key||''}</td>`;
       tbody.appendChild(tr);
     });
-    document.title = 'Chat Admin ('+ (j.count||0) +')';
-  }catch{}
+    document.title = 'Chat Admin ('+ list.length +')';
+  }catch(e){
+    // ignore
+  }
 
-  // rooms list
+  // rooms list (if /rooms.json exists, otherwise this silently fails)
   try{
     const rr = await fetch(httpBase()+'/rooms.json', {
       headers:{'x-conn-token': connEl.value}, cache:'no-store'
     });
     const jr = await rr.json();
-    const set = new Set(jr.rooms||[]);
-    const f = filt.value.trim(); if (f) { for (const r of [...set]) if (!r.includes(f)) set.delete(r); }
-    set.forEach(rm=>{ card(rm); connect(rm); });
-    for (const [rm] of sockets) if (!set.has(rm)) { try{sockets.get(rm)?.close();}catch{} sockets.delete(rm); }
-  }catch{}
+    const set = new Set(jr.rooms || []);
+    const f = roomFilter;
+    if (f) {
+      for (const r of [...set]) if (!r.includes(f)) set.delete(r);
+    }
+    set.forEach(rm => { card(rm); connect(rm); });
+  }catch(e){
+    // ignore (you can instead manually monitor rooms)
+  }
 }
 
-apply.onclick = ()=>{ sockets.forEach(ws=>{ try{ws.close();}catch{} }); sockets.clear(); hydrated.clear(); tick(); };
+apply.onclick = ()=>{
+  hydrated.clear();
+  tick();
+};
 applyF.onclick = tick;
-addBtn.onclick = ()=>{ const rm = manual.value.trim(); if (!rm) return; card(rm); connect(rm); manual.value=''; };
+addBtn.onclick = ()=>{
+  const rm = manual.value.trim();
+  if (!rm) return;
+  card(rm);
+  connect(rm);
+  manual.value='';
+};
 
 /* ---------- key admin ---------- */
-function admHeaders(){ return { 'content-type':'application/json', 'x-admin-token': (localStorage.getItem('admin_token')||'') }; }
+function admHeaders(){
+  return {
+    'content-type':'application/json',
+    'x-admin-token': (localStorage.getItem('admin_token')||'')
+  };
+}
 
 async function loadKeys(){
   keysTbody.innerHTML = `<tr><td colspan="5" class="mut">Loading…</td></tr>`;
   try{
     const r = await fetch(httpBase()+'/admin/keys', { headers: admHeaders(), cache:'no-store' });
-    if (!r.ok){ keysTbody.innerHTML = `<tr><td colspan="5" class="mut">Unauthorized (check ADMIN_TOKEN)</td></tr>`; return; }
-    const arr = await r.json();
+    if (!r.ok){
+      keysTbody.innerHTML = `<tr><td colspan="5" class="mut">Unauthorized (check ADMIN_TOKEN)</td></tr>`;
+      return;
+    }
+    const data = await r.json();
+    // server returns { ok, keys: [...] }
+    const all = Array.isArray(data) ? data : (data.keys || []);
     const q = keyFilter.value.trim().toLowerCase();
-    const rows = (q ? arr.filter(k => (k.label||'').toLowerCase().includes(q) || (k.key||'').includes(q)) : arr);
-    if (!rows.length){ keysTbody.innerHTML = `<tr><td colspan="5" class="mut">No keys</td></tr>`; return; }
+    const rows = q
+      ? all.filter(k => (k.label||'').toLowerCase().includes(q) || (k.key||'').includes(q))
+      : all;
+
+    if (!rows.length){
+      keysTbody.innerHTML = `<tr><td colspan="5" class="mut">No keys</td></tr>`;
+      return;
+    }
     keysTbody.innerHTML = rows.map(k => `
       <tr>
         <td>${k.label||''}</td>
@@ -267,19 +332,25 @@ async function loadKeys(){
           ${k.revoked ? '' : `<button data-revoke="${k.key}">Revoke</button>`}
         </td>
       </tr>`).join('');
-    // wire revoke buttons
+
     keysTbody.querySelectorAll('[data-revoke]').forEach(btn=>{
       btn.onclick = async ()=>{
         const key = btn.getAttribute('data-revoke');
         const r2 = await fetch(httpBase()+'/admin/keys', {
           method:'DELETE', headers: admHeaders(), body: JSON.stringify({ key })
         });
-        if (r2.ok){ keyMsg.textContent = 'Revoked '+key.slice(0,6)+'…'; loadKeys(); }
-        else keyMsg.textContent = 'Revoke failed';
+        if (r2.ok){
+          keyMsg.textContent = 'Revoked '+key.slice(0,6)+'…';
+          loadKeys();
+        } else {
+          keyMsg.textContent = 'Revoke failed';
+        }
         setTimeout(()=> keyMsg.textContent='', 1500);
       };
     });
-  }catch{ keysTbody.innerHTML = `<tr><td colspan="5" class="mut">Error loading keys</td></tr>`; }
+  }catch(e){
+    keysTbody.innerHTML = `<tr><td colspan="5" class="mut">Error loading keys</td></tr>`;
+  }
 }
 
 genKeyBtn.onclick = async ()=>{
@@ -289,12 +360,16 @@ genKeyBtn.onclick = async ()=>{
   });
   if (r.ok){
     const j = await r.json();
-    keyMsg.textContent = 'Generated: '+j.key; keyLabel.value=''; loadKeys();
+    const keyStr = j && j.key && j.key.key ? j.key.key : '';
+    keyMsg.textContent = 'Generated: '+keyStr;
+    keyLabel.value='';
+    loadKeys();
   } else {
     keyMsg.textContent = 'Generate failed (check ADMIN_TOKEN)';
   }
   setTimeout(()=> keyMsg.textContent='', 2500);
 };
+
 refreshBtn.onclick = loadKeys;
 keyFilter.addEventListener('input', loadKeys);
 

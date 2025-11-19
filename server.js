@@ -362,28 +362,41 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    // GET
+    // GET — list keys
     if (method === "GET") {
-      (async () => {
-        const keys = await KeyStore.listKeys();
-        res.writeHead(200, {"content-type":"application/json"});
-        res.end(JSON.stringify({ ok: true, keys }));
-      })();
+      KeyStore.listKeys()
+        .then((keys) => {
+          res.writeHead(200, {"content-type":"application/json"});
+          res.end(JSON.stringify({ ok: true, keys }));
+        })
+        .catch((err) => {
+          console.error("[admin/keys][GET]", err);
+          res.writeHead(500, {"content-type":"application/json"});
+          res.end(JSON.stringify({ ok: false, error: "internal error" }));
+        });
       return;
     }
 
+    // POST / DELETE read body
     let body = "";
     req.on("data", chunk => body += chunk);
-    req.on("end", async () => {
+    req.on("end", () => {
       let json = {};
       try { json = JSON.parse(body || "{}"); } catch {}
 
       // POST — generate key
       if (method === "POST") {
         const label = String(json.label || "").slice(0,128);
-        const rec = await KeyStore.generateKey(label);
-        res.writeHead(200, {"content-type":"application/json"});
-        res.end(JSON.stringify({ ok: true, key: rec }));
+        KeyStore.generateKey(label)
+          .then((rec) => {
+            res.writeHead(200, {"content-type":"application/json"});
+            res.end(JSON.stringify({ ok: true, key: rec }));
+          })
+          .catch((err) => {
+            console.error("[admin/keys][POST]", err);
+            res.writeHead(500, {"content-type":"application/json"});
+            res.end(JSON.stringify({ ok: false, error: "internal error" }));
+          });
         return;
       }
 
@@ -396,11 +409,17 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        const changed = await KeyStore.revokeKey(key);
-        if (changed) notifyRevocation(key);
-
-        res.writeHead(200, {"content-type":"application/json"});
-        res.end(JSON.stringify({ ok: changed }));
+        KeyStore.revokeKey(key)
+          .then((changed) => {
+            if (changed) notifyRevocation(key);
+            res.writeHead(200, {"content-type":"application/json"});
+            res.end(JSON.stringify({ ok: changed }));
+          })
+          .catch((err) => {
+            console.error("[admin/keys][DELETE]", err);
+            res.writeHead(500, {"content-type":"application/json"});
+            res.end(JSON.stringify({ ok: false, error: "internal error" }));
+          });
         return;
       }
 

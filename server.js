@@ -332,7 +332,6 @@ const server = http.createServer((req, res) => {
         snapshot.push({
           room,
           name: meta.name || "",
-          ip: meta.ip || "",
           key: meta.key ? meta.key.slice(0, 8) + "…" : "",
           skins: meta.skin || ["", ""]
         });
@@ -569,7 +568,6 @@ wss.on("connection", async (ws, req) => {
   ws.meta = {
     room,
     name: initialName,
-    ip: rawIp,
     key: providedKey,
     skin: ws.skin
   };

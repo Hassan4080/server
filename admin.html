@@ -67,7 +67,7 @@
     <h2>Connections</h2>
     <div style="max-height:60vh;overflow:auto">
       <table id="tbl">
-        <thead><tr><th>#</th><th>Room</th><th>Name</th><th>IP</th><th>Key</th></tr></thead>
+        <thead><tr><th>#</th><th>Room</th><th>Name</th><th>Key</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -256,7 +256,7 @@ async function tick(){
     list.forEach((c,i)=>{
       const tr = document.createElement('tr');
       tr.innerHTML =
-        `<td>${i+1}</td><td>${c.room||''}</td><td>${c.name||''}</td><td>${c.ip||''}</td><td>${c.key||''}</td>`;
+        `<td>${i+1}</td><td>${c.room||''}</td><td>${c.name||''}</td><td>${c.key||''}</td>`;
       tbody.appendChild(tr);
     });
     document.title = 'Chat Admin ('+ list.length +')';

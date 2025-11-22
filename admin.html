@@ -203,13 +203,45 @@ function push(room, m){
   if (!paused.get(room)) paint(room);
 }
 
-function paint(room){
+function paint(room) {
   const log = document.querySelector(`[data-log="${CSS.escape(room)}"]`);
   const b   = document.querySelector(`[data-b="${CSS.escape(room)}"]`);
   const arr = buffers.get(room) || [];
   if (b) b.textContent = String(arr.length);
   if (!log) return;
-  log.innerHTML = arr.map(x=>`<div>[${new Date(x.ts).toTimeString().slice(0,8)}] <b>${(x.from||'•')}</b> ${x.text||''}</div>`).join('');
+
+  log.innerHTML = arr.map(x => {
+    const raw = x.text || '';
+    let time = '';
+    let name = '';
+    let msg  = raw;
+
+    // pattern: [2025-11-21T11:38:25.582Z] CHAT Hassan: hi
+    const m = raw.match(/^\[(.+?)\]\s+CHAT\s+([^:]+):\s*(.*)$/);
+    if (m) {
+      const iso = m[1];
+      const d = new Date(iso);
+      if (!isNaN(d)) {
+        time = d.toTimeString().slice(0, 8); // HH:MM:SS
+      }
+      name = m[2];
+      msg  = m[3];
+    } else {
+      // fallback: "CHAT Hassan: hi"
+      const m2 = raw.match(/CHAT\s+([^:]+):\s*(.*)$/);
+      if (m2) {
+        name = m2[1];
+        msg  = m2[2];
+      } else {
+        msg = raw;
+      }
+    }
+
+    const prefix = time ? `[${time}] ` : '';
+    const nameHtml = name ? `<b>${name}</b>` : '';
+    return `<div>${prefix}${nameHtml}${nameHtml ? ': ' : ''}${msg}</div>`;
+  }).join('');
+
   log.scrollTop = log.scrollHeight;
 }
 

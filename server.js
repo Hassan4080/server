@@ -663,7 +663,6 @@ wss.on("connection", async (ws, req) => {
     const meta = ws.meta || {};
     const r = meta.room;
     const k = meta.key;
-    const ip = meta.ip?.split(",")[0].trim() || "";
 
     if (rooms.has(r)) {
       const set = rooms.get(r);
@@ -671,7 +670,8 @@ wss.on("connection", async (ws, req) => {
       if (!set.size) rooms.delete(r);
     }
 
-    unregisterKeySocket(k, ip, ws);
+    // Use clientIp from this connection, but do not store or expose it anywhere
+    unregisterKeySocket(k, clientIp, ws);
   });
 });
 

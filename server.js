@@ -190,6 +190,7 @@ if (DATABASE_URL) {
 const rooms = new Map();      // room -> Set<ws>
 const roomLogs = new Map();   // room -> string[]
 const skinRegistry = new Map();
+const pidSkinRegistry = new Map();
 
 function logRoom(room, line) {
   let arr = roomLogs.get(room);
@@ -594,6 +595,16 @@ wss.on("connection", async (ws, req) => {
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
 
+  const roomPidSkins = pidSkinRegistry.get(room);
+  if (roomPidSkins && roomPidSkins.size) {
+    const list = [];
+    for (const [playerID, skin] of roomPidSkins.entries()) {
+      list.push({ playerID, skin });
+    }
+    try {
+      ws.send(JSON.stringify({ type: "skinSyncByPID", skins: list }));
+    } catch {}
+  }
   // send skin registry in bulk
   if (skinRegistry.size) {
     const bulk = [...skinRegistry.entries()].map(([h, [a, b]]) => [h, a, b]);
@@ -621,7 +632,34 @@ wss.on("connection", async (ws, req) => {
       if (hash) skinRegistry.set(hash, [s1, s2]);
       return;
     }
+    // NEW: playerID-based skin updates: { type: "skinByPID", playerID, skin }
+    if (msg.type === "skinByPID") {
+      const pid = Number(msg.playerID);
+      const skin = String(msg.skin || "").slice(0, 256);
+      if (!Number.isFinite(pid) || !skin) return;
 
+      // per-room map
+      let roomMap = pidSkinRegistry.get(room);
+      if (!roomMap) {
+        roomMap = new Map();
+        pidSkinRegistry.set(room, roomMap);
+      }
+      roomMap.set(pid, skin);
+
+      const payload = JSON.stringify({
+        type: "skinByPID",
+        playerID: pid,
+        skin
+      });
+
+      const set = rooms.get(room) || new Set();
+      for (const c of set) {
+        if (c.readyState === c.OPEN) {
+          try { c.send(payload); } catch {}
+        }
+      }
+      return;
+    }
     // rename support ("rename" from chat.js)
     if (msg.type === "rename") {
       const newName = String(msg.name || "").slice(0, 24) || "Anon";

@@ -190,7 +190,7 @@ if (DATABASE_URL) {
 const rooms = new Map();      // room -> Set<ws>
 const roomLogs = new Map();   // room -> string[]
 const skinRegistry = new Map();
-const pidSkinRegistry = new Map();
+const pidSkinRegistry = new Map();   // NEW: room -> Map<playerID, skinUrl>
 
 function logRoom(room, line) {
   let arr = roomLogs.get(room);
@@ -595,21 +595,25 @@ wss.on("connection", async (ws, req) => {
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
 
-  const roomPidSkins = pidSkinRegistry.get(room);
-  if (roomPidSkins && roomPidSkins.size) {
-    const list = [];
-    for (const [playerID, skin] of roomPidSkins.entries()) {
-      list.push({ playerID, skin });
-    }
-    try {
-      ws.send(JSON.stringify({ type: "skinSyncByPID", skins: list }));
-    } catch {}
-  }
   // send skin registry in bulk
   if (skinRegistry.size) {
     const bulk = [...skinRegistry.entries()].map(([h, [a, b]]) => [h, a, b]);
     try {
       ws.send(JSON.stringify({ t: "skin", op: "bulk", data: bulk }));
+    } catch {}
+  }
+  // NEW: send playerID-based skins for this room
+  const pidMap = pidSkinRegistry.get(room);
+  if (pidMap && pidMap.size) {
+    const bulkPID = [...pidMap.entries()].map(([playerID, skin]) => ({
+      playerID,
+      skin
+    }));
+    try {
+      ws.send(JSON.stringify({
+        type: "skinSyncByPID",
+        skins: bulkPID
+      }));
     } catch {}
   }
 
@@ -632,30 +636,33 @@ wss.on("connection", async (ws, req) => {
       if (hash) skinRegistry.set(hash, [s1, s2]);
       return;
     }
-    // NEW: playerID-based skin updates: { type: "skinByPID", playerID, skin }
+    // NEW: playerID-based skin updates
     if (msg.type === "skinByPID") {
       const pid = Number(msg.playerID);
-      const skin = String(msg.skin || "").slice(0, 256);
+      let skin = String(msg.skin || "").slice(0, 128);
+
       if (!Number.isFinite(pid) || !skin) return;
 
-      // per-room map
-      let roomMap = pidSkinRegistry.get(room);
-      if (!roomMap) {
-        roomMap = new Map();
-        pidSkinRegistry.set(room, roomMap);
+      // store in per-room registry
+      let map = pidSkinRegistry.get(room);
+      if (!map) {
+        map = new Map();
+        pidSkinRegistry.set(room, map);
       }
-      roomMap.set(pid, skin);
+      map.set(pid, skin);
 
-      const payload = JSON.stringify({
+      const payload = {
         type: "skinByPID",
+        room,
         playerID: pid,
         skin
-      });
+      };
 
       const set = rooms.get(room) || new Set();
+      const line = JSON.stringify(payload);
       for (const c of set) {
         if (c.readyState === c.OPEN) {
-          try { c.send(payload); } catch {}
+          try { c.send(line); } catch {}
         }
       }
       return;

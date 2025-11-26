@@ -640,15 +640,22 @@ wss.on("connection", async (ws, req) => {
     if (msg.type === "skinByPID") {
       const pid = Number(msg.playerID);
       let skin = String(msg.skin || "").slice(0, 128);
-
+    
       if (!Number.isFinite(pid) || !skin) return;
-
+    
       // store in per-room registry
       let map = pidSkinRegistry.get(room);
       if (!map) {
         map = new Map();
         pidSkinRegistry.set(room, map);
       }
+
+      // 👇 NEW: don't rebroadcast if skin didn't change
+      const prev = map.get(pid);
+      if (prev === skin) {
+        return; // same skin already known for this pid in this room
+      }
+
       map.set(pid, skin);
 
       const payload = {

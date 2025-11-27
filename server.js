@@ -546,6 +546,7 @@ wss.on("connection", async (ws, req) => {
 
   ws.skin = ["", ""];
   ws.nameHash = "";
+  ws.pids = new Set(); // track playerIDs whose skins this socket owns
 
   const { query } = url.parse(req.url, true);
   const room = String(query.room || "global").slice(0, 64);
@@ -657,7 +658,8 @@ wss.on("connection", async (ws, req) => {
       }
 
       map.set(pid, skin);
-
+      ws.pids.add(pid);  // 👈 remember that this socket owns this playerID
+      
       const payload = {
         type: "skinByPID",
         room,
@@ -721,7 +723,17 @@ wss.on("connection", async (ws, req) => {
       set.delete(ws);
       if (!set.size) rooms.delete(r);
     }
-
+    
+    // 👇 NEW: clean up playerID → skin entries for this socket
+    const pidMap = pidSkinRegistry.get(r);
+    if (pidMap && ws.pids && ws.pids.size) {
+      for (const pid of ws.pids) {
+        pidMap.delete(pid);
+      }
+      if (pidMap.size === 0) {
+        pidSkinRegistry.delete(r);
+      }
+    }
     // Use clientIp from this connection, but do not store or expose it anywhere
     unregisterKeySocket(k, clientIp, ws);
   });

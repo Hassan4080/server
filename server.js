@@ -20,7 +20,8 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 // allowlist
 const ORIGIN_WHITELIST = [
   "https://xprivate.vercel.app",
-  "https://delt.io"
+  "https://delt.io",
+  "https://xprtest.vercel.app"
 ];
 
 function isAllowedOrigin(origin) {

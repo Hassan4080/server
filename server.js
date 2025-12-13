@@ -16,6 +16,7 @@ import path from "node:path";
 const PORT = process.env.PORT || 8080;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "";
 
 // allowlist
 const ORIGIN_WHITELIST = [
@@ -201,6 +202,51 @@ function logRoom(room, line) {
   }
   arr.push(`[${new Date().toISOString()}] ${line}`);
   if (arr.length > 200) arr.splice(0, arr.length - 200);
+}
+
+// =============================================================
+//                   DISCORD HELPERS
+// =============================================================
+function discordSafe(s) {
+  // prevent @everyone/@here/user pings and keep it readable
+  return String(s || "")
+    .replace(/@/g, "@\u200b")
+    .replace(/```/g, "``\u200b`");
+}
+
+async function discordPost(content) {
+  if (!DISCORD_WEBHOOK_URL) return;
+
+  const body = JSON.stringify({
+    content: String(content || "").slice(0, 1900),
+    allowed_mentions: { parse: [] }
+  });
+
+  try {
+    await fetch(DISCORD_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body
+    });
+  } catch (err) {
+    console.error("[discord]", err && err.message ? err.message : err);
+  }
+}
+
+function discordLogJoin({ name, label, ip }) {
+  const n = discordSafe(name || "Anon");
+  const l = discordSafe(label || "");
+  const i = discordSafe(ip || "");
+  const line = `JOIN ${n}${l ? ` (${l})` : ""} — IP: ${i}`;
+  void discordPost(line);
+}
+
+function discordLogChat({ name, label, text }) {
+  const n = discordSafe(name || "Anon");
+  const l = discordSafe(label || "");
+  const t = discordSafe(text || "");
+  const line = `${n}${l ? ` (${l})` : ""}: ${t}`;
+  void discordPost(line);
 }
 
 // =============================================================
@@ -567,11 +613,12 @@ wss.on("connection", async (ws, req) => {
     try { ws.close(1008, "Invalid or revoked key"); } catch {}
     return;
   }
-
+  
   ws.meta = {
     room,
     name: initialName,
     key: providedKey,
+    label: (keyInfo && keyInfo.label) ? String(keyInfo.label).slice(0, 64) : "",
     skin: ws.skin
   };
 
@@ -596,6 +643,13 @@ wss.on("connection", async (ws, req) => {
   // join room registry
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
+
+  // Discord: log join (nickname + key label + IP)
+  discordLogJoin({
+    name: ws.meta.name,
+    label: ws.meta.label,
+    ip: clientIp
+  });
 
   // send skin registry in bulk
   if (skinRegistry.size) {
@@ -700,8 +754,15 @@ wss.on("connection", async (ws, req) => {
         text,
         ts: Date.now(),
         skins: ws.skin
+
       };
       logRoom(room, `CHAT ${senderName}: ${text}`);
+      // Discord: GameNickname (KeyLabel): Message
+      discordLogChat({
+        name: senderName,
+        label: (ws.meta && ws.meta.label) || "",
+        text
+      });
 
       const set = rooms.get(room) || new Set();
       const line = JSON.stringify(payload);
@@ -712,6 +773,7 @@ wss.on("connection", async (ws, req) => {
       }
       return;
     }
+
   });
 
   ws.on("close", () => {

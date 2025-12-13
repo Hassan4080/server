@@ -508,9 +508,30 @@ const server = http.createServer((req, res) => {
         return;
       }
 
+      const prevSid = activeSidByKey.get(key);
+
+      // If a session already exists, this is key-sharing -> revoke key
+      if (prevSid) {
+        try { await KeyStore.revokeKey(key); } catch {}
+        activeSidByKey.delete(key);
+
+        // kick everyone currently connected on this key
+        const set = wsByKey.get(key);
+        if (set) {
+          for (const ws of set) {
+            try { ws.close(4005, "Key revoked: multiple sessions"); } catch {}
+          }
+        }
+        wsByKey.delete(key);
+
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, revoked: true, error: "multiple sessions detected" }));
+        return;
+      }
+
+      // First session: create SID
       const sid = sidNew();
       activeSidByKey.set(key, sid);
-      kickOtherSessions(key, sid);
 
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, sid }));

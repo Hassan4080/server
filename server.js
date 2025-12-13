@@ -203,45 +203,6 @@ function logRoom(room, line) {
   if (arr.length > 200) arr.splice(0, arr.length - 200);
 }
 
-
-// =============================================================
-//             SINGLE SESSION PER KEY (anti-sharing)
-// =============================================================
-const activeSidByKey = new Map();  // key -> sid
-const wsByKey = new Map();         // key -> Set<WebSocket>
-
-function sidNew() {
-  return crypto.randomBytes(16).toString("hex");
-}
-
-function attachWsToKey(key, ws) {
-  let set = wsByKey.get(key);
-  if (!set) {
-    set = new Set();
-    wsByKey.set(key, set);
-  }
-  set.add(ws);
-}
-
-function detachWsFromKey(key, ws) {
-  const set = wsByKey.get(key);
-  if (!set) return;
-  set.delete(ws);
-  if (set.size === 0) wsByKey.delete(key);
-}
-
-function kickOtherSessions(key, keepSid) {
-  const set = wsByKey.get(key);
-  if (!set) return;
-  for (const ws of set) {
-    try {
-      if (ws.meta && ws.meta.sid && ws.meta.sid !== keepSid) {
-        ws.close(4003, "Another session started");
-      }
-    } catch {}
-  }
-}
-
 // =============================================================
 //                 KEY SESSIONS (IP tracking)
 // =============================================================
@@ -486,58 +447,6 @@ const server = http.createServer((req, res) => {
 
     return;
   }
-  // POST /session/start  -> start or rotate session for key
-  if (pathname === "/session/start" && method === "POST") {
-    let body = "";
-    req.on("data", chunk => { body += chunk; });
-    req.on("end", async () => {
-      let json = {};
-      try { json = JSON.parse(body || "{}"); } catch {}
-
-      const key = String(json.key || "").trim();
-      if (!key) {
-        res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: "missing key" }));
-        return;
-      }
-
-      const rec = await KeyStore.findKey(key);
-      if (!rec || rec.revoked) {
-        res.writeHead(403, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: "invalid or revoked key" }));
-        return;
-      }
-
-      const prevSid = activeSidByKey.get(key);
-
-      // If a session already exists, this is key-sharing -> revoke key
-      if (prevSid) {
-        try { await KeyStore.revokeKey(key); } catch {}
-        activeSidByKey.delete(key);
-
-        // kick everyone currently connected on this key
-        const set = wsByKey.get(key);
-        if (set) {
-          for (const ws of set) {
-            try { ws.close(4005, "Key revoked: multiple sessions"); } catch {}
-          }
-        }
-        wsByKey.delete(key);
-
-        res.writeHead(403, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, revoked: true, error: "multiple sessions detected" }));
-        return;
-      }
-
-      // First session: create SID
-      const sid = sidNew();
-      activeSidByKey.set(key, sid);
-
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, sid }));
-    });
-    return;
-  }
 
   // POST /validate
   if (pathname === "/validate" && method === "POST") {
@@ -549,7 +458,6 @@ const server = http.createServer((req, res) => {
       const key = String(json.key || "").trim();
 
       const rec = await KeyStore.findKey(key);
-      
       if (!rec || rec.revoked) {
         res.writeHead(403, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "invalid or revoked key" }));
@@ -645,7 +553,6 @@ wss.on("connection", async (ws, req) => {
   const room = String(query.room || "global").slice(0, 64);
   const initialName = String(query.name || "Anon").slice(0, 24);
   const providedKey = String(query.key || "").trim();
-  const providedSid = String(query.sid || "").trim();
 
   const rawIp = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString();
   const clientIp = rawIp.split(",")[0].trim() || rawIp;
@@ -660,21 +567,11 @@ wss.on("connection", async (ws, req) => {
     try { ws.close(1008, "Invalid or revoked key"); } catch {}
     return;
   }
-  if (!providedSid) {
-    try { ws.close(1008, "Session required"); } catch {}
-    return;
-  }
 
-  const activeSid = activeSidByKey.get(providedKey);
-  if (!activeSid || providedSid !== activeSid) {
-    try { ws.close(4003, "Invalid session"); } catch {}
-    return;
-  }
   ws.meta = {
     room,
     name: initialName,
     key: providedKey,
-    sid: providedSid,    
     skin: ws.skin
   };
 
@@ -695,7 +592,7 @@ wss.on("connection", async (ws, req) => {
     try { ws.close(1008, "Too many sessions for this IP"); } catch {}
     return;
   }
-  attachWsToKey(providedKey, ws);
+
   // join room registry
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);
@@ -821,7 +718,7 @@ wss.on("connection", async (ws, req) => {
     const meta = ws.meta || {};
     const r = meta.room;
     const k = meta.key;
-    if (k) detachWsFromKey(k, ws);
+
     if (rooms.has(r)) {
       const set = rooms.get(r);
       set.delete(ws);

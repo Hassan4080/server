@@ -674,7 +674,7 @@ wss.on("connection", async (ws, req) => {
     try { ws.close(1008, "Too many sessions for this IP"); } catch {}
     return;
   }
-
+  attachWsToKey(providedKey, ws);
   // join room registry
   if (!rooms.has(room)) rooms.set(room, new Set());
   rooms.get(room).add(ws);

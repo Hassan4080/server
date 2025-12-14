@@ -17,6 +17,10 @@ const PORT = process.env.PORT || 8080;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "";
+const DISCORD_HIDE_IP_LABELS = new Set([
+  "ireina",
+  "Hassan"
+]);
 
 // allowlist
 const ORIGIN_WHITELIST = [
@@ -236,10 +240,18 @@ async function discordPost(content) {
 function discordLogJoin({ name, label, ip }) {
   const n = discordSafe(name || "Anon");
   const l = discordSafe(label || "");
-  const i = discordSafe(ip || "");
-  const line = `JOIN ${n}${l ? ` (${l})` : ""} — IP: ${i}`;
+
+  const hideIp = l && DISCORD_HIDE_IP_LABELS.has(l);
+  const i = hideIp ? "" : discordSafe(ip || "");
+
+  const line =
+    hideIp
+      ? `JOIN ${n}${l ? ` (${l})` : ""}`
+      : `JOIN ${n}${l ? ` (${l})` : ""} — IP: ${i}`;
+
   void discordPost(line);
 }
+
 
 function discordLogChat({ name, label, text }) {
   const n = discordSafe(name || "Anon");
